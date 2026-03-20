@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod env_expand;
 mod error;
 mod output;
 mod probe;
@@ -18,6 +19,11 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
+    let args = match env_expand::expand_argv(args) {
+        Ok(args) => args,
+        Err(error) => return error.print_and_exit_code_with_quiet(false),
+    };
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) => {

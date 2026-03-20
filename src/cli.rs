@@ -19,53 +19,62 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    #[command(about = "Probe an HTTP or HTTPS health endpoint")]
     Http(HttpArgs),
+    #[command(about = "Probe TCP connectivity to an address")]
     Tcp(TcpArgs),
+    #[command(about = "Run a gRPC health check probe")]
     Grpc(GrpcArgs),
+    #[command(about = "Run a command and evaluate its exit code and output")]
     Exec(ExecArgs),
+    #[command(about = "Probe file state and contents")]
     File(FileArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct HttpArgs {
-    #[arg(long)]
+    #[arg(long, help_heading = "Target")]
     pub url: Option<String>,
-    #[arg(long)]
-    pub unix_socket: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long = "sock", help_heading = "Target")]
+    pub sock: Option<PathBuf>,
+    #[arg(long, help_heading = "Target")]
     pub path: Option<String>,
-    #[arg(long, action = ArgAction::Append)]
-    pub status: Vec<String>,
-    #[arg(long, default_value = "GET")]
+    #[arg(long, default_value = "GET", help_heading = "Request")]
     pub method: String,
-    #[arg(long = "request-header", action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append, help_heading = "Request")]
     pub header: Vec<String>,
-    #[arg(long)]
-    pub host_header: Option<String>,
-    #[arg(long = "response-header-contains", action = ArgAction::Append)]
-    pub response_header_contains: Vec<String>,
-    #[arg(long = "response-header-not-contains", action = ArgAction::Append)]
-    pub response_header_not_contains: Vec<String>,
-    #[arg(long = "body-contains", action = ArgAction::Append)]
-    pub body_contains: Vec<String>,
-    #[arg(long = "body-not-contains", action = ArgAction::Append)]
-    pub body_not_contains: Vec<String>,
-    #[arg(long, default_value_t = 65_536)]
-    pub max_body_bytes: usize,
+    #[arg(long, help_heading = "Request")]
+    pub host: Option<String>,
+    #[arg(long, action = ArgAction::Append, help_heading = "Assertions")]
+    pub status: Vec<String>,
+    #[arg(long = "header-contains", action = ArgAction::Append, help_heading = "Assertions")]
+    pub header_contains: Vec<String>,
+    #[arg(
+        long = "header-not-contains",
+        action = ArgAction::Append,
+        help_heading = "Assertions"
+    )]
+    pub header_not_contains: Vec<String>,
+    #[arg(long = "contains", action = ArgAction::Append, help_heading = "Assertions")]
+    pub contains: Vec<String>,
+    #[arg(long = "not-contains", action = ArgAction::Append, help_heading = "Assertions")]
+    pub not_contains: Vec<String>,
     #[command(flatten)]
     pub tls: TlsArgs,
+    #[arg(long = "max-body", default_value_t = 65_536, help_heading = "Limits")]
+    pub max_body: usize,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct TcpArgs {
-    #[arg(long)]
-    pub address: String,
+    #[arg(long = "addr")]
+    pub addr: String,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct GrpcArgs {
-    #[arg(long)]
-    pub address: String,
+    #[arg(long = "addr")]
+    pub addr: String,
     #[arg(long)]
     pub service: Option<String>,
     #[arg(long)]
@@ -78,14 +87,14 @@ pub struct GrpcArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ExecArgs {
-    #[arg(long = "success-exit-code", action = ArgAction::Append)]
-    pub success_exit_code: Vec<i32>,
-    #[arg(long = "stdout-contains", action = ArgAction::Append)]
-    pub stdout_contains: Vec<String>,
-    #[arg(long = "stderr-contains", action = ArgAction::Append)]
-    pub stderr_contains: Vec<String>,
-    #[arg(long, default_value_t = 65_536)]
-    pub max_output_bytes: usize,
+    #[arg(long = "ok-code", action = ArgAction::Append)]
+    pub ok_code: Vec<i32>,
+    #[arg(long = "out-contains", action = ArgAction::Append)]
+    pub out_contains: Vec<String>,
+    #[arg(long = "err-contains", action = ArgAction::Append)]
+    pub err_contains: Vec<String>,
+    #[arg(long = "max-out", default_value_t = 65_536)]
+    pub max_out: usize,
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<OsString>,
 }
@@ -106,21 +115,21 @@ pub struct FileArgs {
     pub max_size: Option<u64>,
     #[arg(long, value_parser = parse_duration)]
     pub max_age: Option<Duration>,
-    #[arg(long, default_value_t = 65_536)]
-    pub max_read_bytes: usize,
+    #[arg(long = "max-read", default_value_t = 65_536)]
+    pub max_read: usize,
 }
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct TlsArgs {
-    #[arg(long)]
-    pub ca_file: Option<PathBuf>,
-    #[arg(long)]
-    pub client_cert: Option<PathBuf>,
-    #[arg(long)]
-    pub client_key: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long = "ca", help_heading = "TLS")]
+    pub ca: Option<PathBuf>,
+    #[arg(long = "cert", help_heading = "TLS")]
+    pub cert: Option<PathBuf>,
+    #[arg(long = "key", help_heading = "TLS")]
+    pub key: Option<PathBuf>,
+    #[arg(long, help_heading = "TLS")]
     pub server_name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help_heading = "TLS")]
     pub insecure_skip_verify: bool,
 }
 

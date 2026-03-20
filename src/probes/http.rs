@@ -25,17 +25,18 @@ const USER_AGENT_VALUE: &str = concat!("salus/", env!("CARGO_PKG_VERSION"));
 pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Result<ProbeReport> {
     validate_http_args(&args)?;
 
-    if let Some(unix_socket) = args.unix_socket.clone() {
+    if let Some(sock) = args.sock.clone() {
         let path = args
             .path
             .clone()
-            .ok_or_else(|| AppError::invalid_config("--path is required with --unix-socket"))?;
-        return run_unix_socket(cli, args, unix_socket, path, started).await;
+            .ok_or_else(|| AppError::invalid_config("--path is required with --sock"))?;
+        return run_unix_socket(cli, args, sock, path, started).await;
     }
 
-    let raw_url = args.url.clone().ok_or_else(|| {
-        AppError::invalid_config("--url is required when --unix-socket is not set")
-    })?;
+    let raw_url = args
+        .url
+        .clone()
+        .ok_or_else(|| AppError::invalid_config("--url is required when --sock is not set"))?;
     let url = Url::parse(&raw_url)
         .map_err(|error| AppError::invalid_config(format!("invalid URL {raw_url}: {error}")))?;
 
@@ -54,9 +55,9 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 
     let method = parse_method(&args.method)?;
     let headers = parse_headers(&args.header)?;
-    let response_header_contains = parse_header_assertions(&args.response_header_contains)?;
-    let response_header_not_contains = parse_header_assertions(&args.response_header_not_contains)?;
-    let host_header = default_host_header(&url, args.host_header.as_deref())?;
+    let header_contains = parse_header_assertions(&args.header_contains)?;
+    let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
+    let host = default_host_header(&url, args.host.as_deref())?;
     let status_ranges = parse_status_ranges(&args.status)?;
     let uses_tls = url.scheme() == "https";
 
@@ -83,7 +84,7 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
         let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
 
         let mut builder = Request::builder().method(method).uri(raw_url.as_str());
-        builder = builder.header(HOST, host_header);
+        builder = builder.header(HOST, host);
         builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
 
         for (name, value) in headers {
@@ -109,12 +110,12 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 
         assert_response_headers(
             &response_headers,
-            &response_header_contains,
-            &response_header_not_contains,
+            &header_contains,
+            &header_not_contains,
             &raw_url,
         )?;
 
-        if args.body_contains.is_empty() && args.body_not_contains.is_empty() {
+        if args.contains.is_empty() && args.not_contains.is_empty() {
             return Ok::<_, AppError>(ProbeReport {
                 mode: "http",
                 target: raw_url.clone(),
@@ -126,20 +127,20 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 
         let body = read_body(
             response.into_body(),
-            args.max_body_bytes,
-            !args.body_not_contains.is_empty(),
+            args.max_body,
+            !args.not_contains.is_empty(),
         )
         .await?;
 
         let body_text = String::from_utf8_lossy(&body.bytes);
 
-        for needle in &args.body_contains {
+        for needle in &args.contains {
             if !body_text.contains(needle) {
                 if body.truncated {
                     return Err(AppError::failure(format!(
                         "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
                         raw_url,
-                        args.max_body_bytes,
+                        args.max_body,
                         needle
                     )));
                 }
@@ -150,13 +151,13 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
             }
         }
 
-        if body.truncated && !args.body_not_contains.is_empty() {
+        if body.truncated && !args.not_contains.is_empty() {
             return Err(AppError::failure(
                 "response body was truncated, cannot prove negative body assertions",
             ));
         }
 
-        for needle in &args.body_not_contains {
+        for needle in &args.not_contains {
             if body_text.contains(needle) {
                 return Err(AppError::failure(format!(
                     "response body from {} contains forbidden text {:?}",
@@ -187,7 +188,7 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 async fn run_unix_socket(
     cli: Cli,
     args: HttpArgs,
-    unix_socket: PathBuf,
+    sock: PathBuf,
     path: String,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
@@ -199,22 +200,19 @@ async fn run_unix_socket(
 
     let method = parse_method(&args.method)?;
     let headers = parse_headers(&args.header)?;
-    let response_header_contains = parse_header_assertions(&args.response_header_contains)?;
-    let response_header_not_contains = parse_header_assertions(&args.response_header_not_contains)?;
-    let host_header = args
-        .host_header
-        .clone()
-        .unwrap_or_else(|| "localhost".to_string());
+    let header_contains = parse_header_assertions(&args.header_contains)?;
+    let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
+    let host = args.host.clone().unwrap_or_else(|| "localhost".to_string());
     let status_ranges = parse_status_ranges(&args.status)?;
-    let target = format!("unix:{}{}", unix_socket.display(), path);
+    let target = format!("unix:{}{}", sock.display(), path);
 
     let timeout = cli.timeout;
     let verbose_cli = cli.clone();
     let result = tokio::time::timeout(timeout, async {
-        let stream = UnixStream::connect(&unix_socket).await.map_err(|error| {
+        let stream = UnixStream::connect(&sock).await.map_err(|error| {
             AppError::failure(format!(
                 "failed to connect to unix socket {}: {error}",
-                unix_socket.display()
+                sock.display()
             ))
         })?;
         let io = TokioIo::new(stream);
@@ -226,7 +224,7 @@ async fn run_unix_socket(
         });
 
         let mut builder = Request::builder().method(method).uri(path.as_str());
-        builder = builder.header(HOST, host_header);
+        builder = builder.header(HOST, host);
         builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
 
         for (name, value) in headers {
@@ -240,7 +238,7 @@ async fn run_unix_socket(
         let response = sender.send_request(request).await.map_err(|error| {
             AppError::failure(format!(
                 "HTTP request over unix socket {} failed: {error}",
-                unix_socket.display()
+                sock.display()
             ))
         })?;
         let status = response.status().as_u16();
@@ -255,12 +253,12 @@ async fn run_unix_socket(
 
         assert_response_headers(
             &response_headers,
-            &response_header_contains,
-            &response_header_not_contains,
+            &header_contains,
+            &header_not_contains,
             &target,
         )?;
 
-        if args.body_contains.is_empty() && args.body_not_contains.is_empty() {
+        if args.contains.is_empty() && args.not_contains.is_empty() {
             return Ok::<_, AppError>(ProbeReport {
                 mode: "http",
                 target,
@@ -272,19 +270,19 @@ async fn run_unix_socket(
 
         let body = read_body(
             response.into_body(),
-            args.max_body_bytes,
-            !args.body_not_contains.is_empty(),
+            args.max_body,
+            !args.not_contains.is_empty(),
         )
         .await?;
         let body_text = String::from_utf8_lossy(&body.bytes);
 
-        for needle in &args.body_contains {
+        for needle in &args.contains {
             if !body_text.contains(needle) {
                 if body.truncated {
                     return Err(AppError::failure(format!(
                         "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
                         target,
-                        args.max_body_bytes,
+                        args.max_body,
                         needle
                     )));
                 }
@@ -295,13 +293,13 @@ async fn run_unix_socket(
             }
         }
 
-        if body.truncated && !args.body_not_contains.is_empty() {
+        if body.truncated && !args.not_contains.is_empty() {
             return Err(AppError::failure(
                 "response body was truncated, cannot prove negative body assertions",
             ));
         }
 
-        for needle in &args.body_not_contains {
+        for needle in &args.not_contains {
             if body_text.contains(needle) {
                 return Err(AppError::failure(format!(
                     "response body from {} contains forbidden text {:?}",
@@ -330,39 +328,35 @@ async fn run_unix_socket(
 }
 
 fn validate_http_args(args: &HttpArgs) -> Result<()> {
-    match (&args.url, &args.unix_socket) {
+    match (&args.url, &args.sock) {
         (Some(_), Some(_)) => Err(AppError::invalid_config(
-            "--url and --unix-socket cannot be used together",
+            "--url and --sock cannot be used together",
         )),
         (None, None) => Err(AppError::invalid_config(
-            "either --url or --unix-socket must be provided",
+            "either --url or --sock must be provided",
         )),
         _ => Ok(()),
     }?;
 
-    if args.unix_socket.is_some() {
+    if args.sock.is_some() {
         if has_tls_flags(&args.tls) {
             return Err(AppError::invalid_config(
-                "TLS flags are not supported with --unix-socket",
+                "TLS flags are not supported with --sock",
             ));
         }
     } else if args.path.is_some() {
         return Err(AppError::invalid_config(
-            "--path may only be used with --unix-socket",
+            "--path may only be used with --sock",
         ));
     }
 
-    if args.max_body_bytes == 0
-        && (!args.body_contains.is_empty() || !args.body_not_contains.is_empty())
-    {
+    if args.max_body == 0 && (!args.contains.is_empty() || !args.not_contains.is_empty()) {
         return Err(AppError::invalid_config(
-            "--max-body-bytes must be greater than 0 when body assertions are used",
+            "--max-body must be greater than 0 when body assertions are used",
         ));
     }
 
-    if args.method == "HEAD"
-        && (!args.body_contains.is_empty() || !args.body_not_contains.is_empty())
-    {
+    if args.method == "HEAD" && (!args.contains.is_empty() || !args.not_contains.is_empty()) {
         return Err(AppError::invalid_config(
             "HTTP body assertions are not supported with HEAD requests",
         ));
@@ -372,9 +366,9 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
 }
 
 fn has_tls_flags(tls: &TlsArgs) -> bool {
-    tls.ca_file.is_some()
-        || tls.client_cert.is_some()
-        || tls.client_key.is_some()
+    tls.ca.is_some()
+        || tls.cert.is_some()
+        || tls.key.is_some()
         || tls.server_name.is_some()
         || tls.insecure_skip_verify
 }

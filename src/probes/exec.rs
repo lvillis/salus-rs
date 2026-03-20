@@ -12,18 +12,16 @@ use crate::{
 };
 
 pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Result<ProbeReport> {
-    if args.max_output_bytes == 0
-        && (!args.stdout_contains.is_empty() || !args.stderr_contains.is_empty())
-    {
+    if args.max_out == 0 && (!args.out_contains.is_empty() || !args.err_contains.is_empty()) {
         return Err(AppError::invalid_config(
-            "--max-output-bytes must be greater than 0 when output assertions are used",
+            "--max-out must be greater than 0 when output assertions are used",
         ));
     }
 
-    let success_codes = if args.success_exit_code.is_empty() {
+    let success_codes = if args.ok_code.is_empty() {
         vec![0]
     } else {
-        args.success_exit_code.clone()
+        args.ok_code.clone()
     };
 
     for code in &success_codes {
@@ -65,8 +63,8 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
         .take()
         .ok_or_else(|| AppError::internal("failed to capture child stderr"))?;
 
-    let stdout_task = tokio::spawn(read_limited(stdout, args.max_output_bytes));
-    let stderr_task = tokio::spawn(read_limited(stderr, args.max_output_bytes));
+    let stdout_task = tokio::spawn(read_limited(stdout, args.max_out));
+    let stderr_task = tokio::spawn(read_limited(stderr, args.max_out));
 
     let status = match tokio::time::timeout(cli.timeout, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -110,7 +108,7 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
     }
 
     let stdout_text = String::from_utf8_lossy(&stdout_bytes);
-    for needle in &args.stdout_contains {
+    for needle in &args.out_contains {
         if !stdout_text.contains(needle) {
             return Err(AppError::failure(format!(
                 "stdout of {command_label} does not contain required text {:?}",
@@ -120,7 +118,7 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
     }
 
     let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-    for needle in &args.stderr_contains {
+    for needle in &args.err_contains {
         if !stderr_text.contains(needle) {
             return Err(AppError::failure(format!(
                 "stderr of {command_label} does not contain required text {:?}",

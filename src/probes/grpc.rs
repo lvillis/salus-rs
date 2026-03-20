@@ -25,11 +25,11 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
         return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
     }
 
-    let endpoint_uri = format!("http://{}", args.address);
+    let endpoint_uri = format!("http://{}", args.addr);
     let request_scheme = if args.tls { "https" } else { "http" };
     let target = match &args.service {
-        Some(service) if !service.is_empty() => format!("{} service={service}", args.address),
-        _ => args.address.clone(),
+        Some(service) if !service.is_empty() => format!("{} service={service}", args.addr),
+        _ => args.addr.clone(),
     };
 
     let timeout = cli.timeout;
@@ -48,14 +48,12 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
                 })?;
             endpoint = endpoint.origin(origin);
         } else if args.tls {
-            let origin = format!("https://{}", args.address)
-                .parse()
-                .map_err(|error| {
-                    AppError::invalid_config(format!(
-                        "invalid gRPC TLS origin https://{}: {error}",
-                        args.address
-                    ))
-                })?;
+            let origin = format!("https://{}", args.addr).parse().map_err(|error| {
+                AppError::invalid_config(format!(
+                    "invalid gRPC TLS origin https://{}: {error}",
+                    args.addr
+                ))
+            })?;
             endpoint = endpoint.origin(origin);
         }
 
@@ -78,14 +76,14 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
                 .map_err(|error| {
                     AppError::failure(format!(
                         "failed to connect to gRPC target {}: {error}",
-                        args.address
+                        args.addr
                     ))
                 })?
         } else {
             endpoint.connect().await.map_err(|error| {
                 AppError::failure(format!(
                     "failed to connect to gRPC target {}: {error}",
-                    args.address
+                    args.addr
                 ))
             })?
         };
@@ -99,7 +97,7 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
             .map_err(|status| {
                 AppError::failure(format!(
                     "gRPC health check for {} failed: code={} message={}",
-                    args.address,
+                    args.addr,
                     status.code(),
                     status.message()
                 ))
@@ -108,14 +106,14 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
         let status = ServingStatus::try_from(response.get_ref().status).map_err(|_| {
             AppError::failure(format!(
                 "gRPC health check for {} returned an unknown serving status",
-                args.address
+                args.addr
             ))
         })?;
 
         if status != ServingStatus::Serving {
             return Err(AppError::failure(format!(
                 "gRPC health check for {} returned {status:?}",
-                args.address
+                args.addr
             )));
         }
 
@@ -141,9 +139,9 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
 type ConnectorFuture<T> = Pin<Box<dyn Future<Output = std::result::Result<T, io::Error>> + Send>>;
 
 fn has_tls_flags(args: &GrpcArgs) -> bool {
-    args.tls_args.ca_file.is_some()
-        || args.tls_args.client_cert.is_some()
-        || args.tls_args.client_key.is_some()
+    args.tls_args.ca.is_some()
+        || args.tls_args.cert.is_some()
+        || args.tls_args.key.is_some()
         || args.tls_args.server_name.is_some()
         || args.tls_args.insecure_skip_verify
 }

@@ -18,9 +18,9 @@ pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Resul
         )));
     }
 
-    if args.max_read_bytes == 0 && !args.contains.is_empty() {
+    if args.max_read == 0 && !args.contains.is_empty() {
         return Err(AppError::invalid_config(
-            "--max-read-bytes must be greater than 0 when file content assertions are used",
+            "--max-read must be greater than 0 when file content assertions are used",
         ));
     }
 
@@ -95,7 +95,7 @@ pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Resul
         })?;
 
         if !args.contains.is_empty() {
-            let file_body = read_file(&mut file, &args.path, args.max_read_bytes).await?;
+            let file_body = read_file(&mut file, &args.path, args.max_read).await?;
             let body = String::from_utf8_lossy(&file_body.bytes);
             for needle in &args.contains {
                 if !body.contains(needle) {
@@ -103,7 +103,7 @@ pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Resul
                         return Err(AppError::failure(format!(
                             "file {} was truncated at {} bytes, cannot prove required text {:?}",
                             args.path.display(),
-                            args.max_read_bytes,
+                            args.max_read,
                             needle
                         )));
                     }

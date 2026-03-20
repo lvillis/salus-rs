@@ -68,28 +68,28 @@ HTTP:
 
 ```bash
 salus http --url http://127.0.0.1:8080/healthz
-salus http --url http://127.0.0.1:8080/healthz --request-header x-api-key:secret
-salus http --url https://127.0.0.1:8443/ready --ca-file /etc/ssl/health-ca.pem --server-name localhost
-salus http --url https://127.0.0.1:8443/ready --ca-file /etc/ssl/health-ca.pem --server-name localhost --response-header-contains x-ready:ok
+salus http --url http://127.0.0.1:8080/healthz --header x-api-key:secret
+salus http --url https://127.0.0.1:8443/ready --ca /etc/ssl/health-ca.pem --server-name localhost
+salus http --url https://127.0.0.1:8443/ready --ca /etc/ssl/health-ca.pem --server-name localhost --header-contains x-ready:ok --contains ready
 ```
 
 TCP:
 
 ```bash
-salus tcp --address 127.0.0.1:5432
+salus tcp --addr 127.0.0.1:5432
 ```
 
 gRPC health:
 
 ```bash
-salus grpc --address 127.0.0.1:50051
-salus grpc --address 127.0.0.1:50051 --tls --ca-file /etc/ssl/grpc-ca.pem --server-name localhost
+salus grpc --addr 127.0.0.1:50051
+salus grpc --addr 127.0.0.1:50051 --tls --ca /etc/ssl/grpc-ca.pem --server-name localhost
 ```
 
 Exec:
 
 ```bash
-salus exec --stdout-contains ok -- /app/bin/check-ready
+salus exec --out-contains ok -- /app/bin/check-ready
 ```
 
 File:
@@ -116,9 +116,15 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=salus /bin/salus /bin/salus
 COPY ./my-app /bin/my-app
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "--url", "http://127.0.0.1:8080/healthz", "--body-contains", "ok"]
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "--url", "http://127.0.0.1:8080/healthz", "--contains", "ok"]
 
 ENTRYPOINT ["/bin/my-app"]
+```
+
+`salus` expands `${VAR}` and `${VAR:-default}` inside JSON-array arguments before parsing them, so Docker `HEALTHCHECK CMD [...]` does not need `/bin/sh` just to inject environment variables:
+
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "--url", "http://127.0.0.1:${PORT}/healthz", "--contains", "ok"]
 ```
 
 ## Kubernetes
@@ -131,11 +137,13 @@ livenessProbe:
     command:
       - /bin/salus
       - grpc
-      - --address
+      - --addr
       - 127.0.0.1:50051
       - --tls
-      - --ca-file
+      - --ca
       - /etc/tls/ca.pem
       - --server-name
       - localhost
 ```
+
+The same `${VAR}` and `${VAR:-default}` expansion works in Kubernetes `exec.command` arrays without relying on a shell inside the container.

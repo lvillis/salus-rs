@@ -10,24 +10,23 @@ use crate::{
 
 pub async fn run(cli: Cli, args: TcpArgs, started: std::time::Instant) -> Result<ProbeReport> {
     let timeout = cli.timeout;
-    let target = args.address.clone();
+    let target = args.addr.clone();
 
     let result = tokio::time::timeout(timeout, async move {
-        let addrs = lookup_host(&args.address)
+        let addrs = lookup_host(&args.addr)
             .await
             .map_err(|error| match error.kind() {
-                std::io::ErrorKind::InvalidInput => AppError::invalid_config(format!(
-                    "invalid TCP address {}: {error}",
-                    args.address
-                )),
-                _ => AppError::failure(format!("failed to resolve {}: {error}", args.address)),
+                std::io::ErrorKind::InvalidInput => {
+                    AppError::invalid_config(format!("invalid TCP address {}: {error}", args.addr))
+                }
+                _ => AppError::failure(format!("failed to resolve {}: {error}", args.addr)),
             })?
             .collect::<Vec<_>>();
 
         if addrs.is_empty() {
             return Err(AppError::failure(format!(
                 "no TCP addresses resolved for {}",
-                args.address
+                args.addr
             )));
         }
 
@@ -63,8 +62,8 @@ pub async fn run(cli: Cli, args: TcpArgs, started: std::time::Instant) -> Result
         }
 
         Err(AppError::failure(match last_error {
-            Some(error) => format!("failed to connect to {}: {error}", args.address),
-            None => format!("timed out connecting to {}", args.address),
+            Some(error) => format!("failed to connect to {}: {error}", args.addr),
+            None => format!("timed out connecting to {}", args.addr),
         }))
     })
     .await;

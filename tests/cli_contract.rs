@@ -16,6 +16,26 @@ fn run_salus(args: &[&str]) -> Output {
         .expect("salus test binary must execute")
 }
 
+fn run_salus_with_env(args: &[&str], envs: &[(&str, Option<&str>)]) -> Output {
+    let mut command = Command::new(salus_bin());
+    command.args(args);
+
+    for (name, value) in envs {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+
+    command
+        .output()
+        .expect("salus test binary must execute with custom environment")
+}
+
 fn temp_file_path(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -31,12 +51,45 @@ fn write_file(path: &Path, bytes: &[u8]) {
 #[test]
 fn help_exits_zero_and_prints_to_stdout() {
     let output = run_salus(&["--help"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert_eq!(output.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Container health check probe runner")
-    );
+    assert!(stdout.contains("Container health check probe runner"));
+    assert!(stdout.contains("http  Probe an HTTP or HTTPS health endpoint"));
+    assert!(stdout.contains("tcp   Probe TCP connectivity to an address"));
+    assert!(stdout.contains("grpc  Run a gRPC health check probe"));
+    assert!(stdout.contains("exec  Run a command and evaluate its exit code and output"));
+    assert!(stdout.contains("file  Probe file state and contents"));
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn http_help_groups_options_by_concern() {
+    let output = run_salus(&["http", "--help"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let target = stdout
+        .find("Target:")
+        .expect("http help must include Target");
+    let request = stdout
+        .find("Request:")
+        .expect("http help must include Request");
+    let assertions = stdout
+        .find("Assertions:")
+        .expect("http help must include Assertions");
+    let tls = stdout.find("TLS:").expect("http help must include TLS");
+    let limits = stdout
+        .find("Limits:")
+        .expect("http help must include Limits");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert!(target < request);
+    assert!(request < assertions);
+    assert!(assertions < tls);
+    assert!(tls < limits);
+    assert!(stdout.contains("--header <HEADER>"));
+    assert!(stdout.contains("--contains <CONTAINS>"));
+    assert!(stdout.contains("--not-contains <NOT_CONTAINS>"));
 }
 
 #[test]
@@ -55,6 +108,83 @@ fn invalid_duration_exits_three_and_prints_to_stderr() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid duration: nope"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn expands_environment_variables_before_cli_parsing() {
+    let path = temp_file_path("salus-cli-env-expansion");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "--timeout",
+            "${SALUS_TEST_TIMEOUT}",
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_NEEDLE}",
+        ],
+        &[
+            ("SALUS_TEST_TIMEOUT", Some("1s")),
+            ("SALUS_TEST_NEEDLE", Some("ready")),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn missing_environment_variable_exits_three() {
+    let path = temp_file_path("salus-cli-missing-env");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_MISSING_ENV}",
+        ],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn environment_variable_defaults_are_supported() {
+    let path = temp_file_path("salus-cli-env-default");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_DEFAULT_NEEDLE:-ready}",
+        ],
+        &[("SALUS_TEST_DEFAULT_NEEDLE", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 
     let _ = fs::remove_file(path);
 }

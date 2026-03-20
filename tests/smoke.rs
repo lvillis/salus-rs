@@ -46,7 +46,7 @@ async fn tcp_probe_succeeds_on_open_port() {
         let _ = listener.accept().await;
     });
 
-    let code = salus::main_entry(args(&["salus", "tcp", "--address", &addr.to_string()])).await;
+    let code = salus::main_entry(args(&["salus", "tcp", "--addr", &addr.to_string()])).await;
 
     assert_eq!(code, 0);
 }
@@ -58,7 +58,7 @@ async fn timeout_must_be_greater_than_zero() {
         "--timeout",
         "0s",
         "tcp",
-        "--address",
+        "--addr",
         "127.0.0.1:80",
     ]))
     .await;
@@ -75,7 +75,7 @@ async fn http_probe_succeeds_on_plain_http() {
         "http",
         "--url",
         &format!("http://{addr}/healthz"),
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -84,7 +84,7 @@ async fn http_probe_succeeds_on_plain_http() {
 }
 
 #[tokio::test]
-async fn http_probe_sends_request_header() {
+async fn http_probe_sends_header() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -108,7 +108,7 @@ async fn http_probe_sends_request_header() {
         "http",
         "--url",
         &format!("http://{addr}/healthz"),
-        "--request-header",
+        "--header",
         "x-api-key:secret",
     ]))
     .await;
@@ -158,9 +158,9 @@ async fn http_probe_succeeds_with_response_header_assertions() {
         "http",
         "--url",
         &format!("http://{addr}/healthz"),
-        "--response-header-contains",
+        "--header-contains",
         "x-ready:ok",
-        "--response-header-not-contains",
+        "--header-not-contains",
         "x-ready:error",
     ]))
     .await;
@@ -179,7 +179,7 @@ async fn http_probe_fails_when_required_response_header_text_is_missing() {
         "http",
         "--url",
         &format!("http://{addr}/healthz"),
-        "--response-header-contains",
+        "--header-contains",
         "x-ready:ok",
     ]))
     .await;
@@ -197,11 +197,11 @@ async fn http_probe_succeeds_over_unix_socket() {
     let code = salus::main_entry(args(&[
         "salus",
         "http",
-        "--unix-socket",
+        "--sock",
         &socket_path.display().to_string(),
         "--path",
         "/healthz",
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -220,11 +220,11 @@ async fn https_probe_succeeds_with_ca_file_and_server_name_override() {
         "http",
         "--url",
         &format!("https://{addr}/healthz"),
-        "--ca-file",
+        "--ca",
         TLS_CERT_PATH,
         "--server-name",
         "localhost",
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -242,7 +242,7 @@ async fn https_probe_succeeds_with_insecure_skip_verify() {
         "--url",
         &format!("https://{addr}/healthz"),
         "--insecure-skip-verify",
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -274,7 +274,7 @@ async fn https_probe_fails_with_wrong_server_name() {
         "http",
         "--url",
         &format!("https://{addr}/healthz"),
-        "--ca-file",
+        "--ca",
         TLS_CERT_PATH,
         "--server-name",
         "example.invalid",
@@ -293,13 +293,13 @@ async fn https_probe_succeeds_over_http2() {
         "http",
         "--url",
         &format!("https://{addr}/healthz"),
-        "--ca-file",
+        "--ca",
         TLS_CERT_PATH,
         "--server-name",
         "localhost",
-        "--body-contains",
+        "--contains",
         "ok",
-        "--response-header-contains",
+        "--header-contains",
         "x-salus-protocol:h2",
     ]))
     .await;
@@ -322,9 +322,9 @@ async fn http_probe_fails_when_negative_body_assertion_truncates() {
         "http",
         "--url",
         &format!("http://{addr}/healthz"),
-        "--max-body-bytes",
+        "--max-body",
         "4",
-        "--body-not-contains",
+        "--not-contains",
         "zzz",
     ]))
     .await;
@@ -339,9 +339,9 @@ async fn http_probe_rejects_zero_body_limit_with_body_assertion() {
         "http",
         "--url",
         "http://127.0.0.1:1/healthz",
-        "--max-body-bytes",
+        "--max-body",
         "0",
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -358,7 +358,7 @@ async fn http_probe_rejects_body_assertions_for_head_requests() {
         "http://127.0.0.1:1/healthz",
         "--method",
         "HEAD",
-        "--body-contains",
+        "--contains",
         "ok",
     ]))
     .await;
@@ -398,7 +398,7 @@ async fn file_probe_succeeds_with_readable_only_and_zero_read_limit() {
         "--path",
         &path.display().to_string(),
         "--readable",
-        "--max-read-bytes",
+        "--max-read",
         "0",
     ]))
     .await;
@@ -420,7 +420,7 @@ async fn file_probe_rejects_zero_read_limit_when_content_must_be_read() {
         &path.display().to_string(),
         "--contains",
         "ready",
-        "--max-read-bytes",
+        "--max-read",
         "0",
     ]))
     .await;
@@ -442,7 +442,7 @@ async fn file_probe_fails_when_required_text_may_be_beyond_read_limit() {
         &path.display().to_string(),
         "--contains",
         "ready",
-        "--max-read-bytes",
+        "--max-read",
         "4",
     ]))
     .await;
@@ -457,7 +457,7 @@ async fn exec_probe_succeeds() {
     let code = salus::main_entry(args(&[
         "salus",
         "exec",
-        "--stdout-contains",
+        "--out-contains",
         "ok",
         "--",
         "sh",
@@ -474,9 +474,9 @@ async fn exec_probe_rejects_zero_output_limit_with_output_assertion() {
     let code = salus::main_entry(args(&[
         "salus",
         "exec",
-        "--stdout-contains",
+        "--out-contains",
         "ok",
-        "--max-output-bytes",
+        "--max-out",
         "0",
         "--",
         "sh",
@@ -500,7 +500,7 @@ async fn exec_probe_fails_when_command_is_terminated_by_signal() {
 async fn grpc_probe_succeeds() {
     let addr = spawn_grpc_server(false).await;
 
-    let code = salus::main_entry(args(&["salus", "grpc", "--address", &addr.to_string()])).await;
+    let code = salus::main_entry(args(&["salus", "grpc", "--addr", &addr.to_string()])).await;
 
     assert_eq!(code, 0);
 }
@@ -513,7 +513,7 @@ async fn grpc_probe_fails_when_service_is_not_serving() {
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--service",
         "db",
@@ -530,7 +530,7 @@ async fn grpc_probe_fails_when_service_is_unregistered() {
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--service",
         "db",
@@ -547,10 +547,10 @@ async fn grpc_probe_succeeds_with_tls_ca_file_and_server_name_override() {
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--tls",
-        "--ca-file",
+        "--ca",
         TLS_CERT_PATH,
         "--server-name",
         "localhost",
@@ -567,7 +567,7 @@ async fn grpc_probe_fails_with_tls_without_trust_override_for_self_signed_server
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--tls",
     ]))
@@ -583,10 +583,10 @@ async fn grpc_probe_fails_with_wrong_server_name() {
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--tls",
-        "--ca-file",
+        "--ca",
         TLS_CERT_PATH,
         "--server-name",
         "example.invalid",
@@ -603,7 +603,7 @@ async fn grpc_probe_succeeds_with_tls_and_insecure_skip_verify() {
     let code = salus::main_entry(args(&[
         "salus",
         "grpc",
-        "--address",
+        "--addr",
         &addr.to_string(),
         "--tls",
         "--insecure-skip-verify",

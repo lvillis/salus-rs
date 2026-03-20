@@ -28,7 +28,7 @@ pub fn parse_server_name_override(raw: &str) -> Result<ServerName<'static>> {
 }
 
 fn build_client_config(tls: &TlsArgs) -> Result<ClientConfig> {
-    let roots = load_root_store(tls.ca_file.as_deref())?;
+    let roots = load_root_store(tls.ca.as_deref())?;
     let builder = rustls::ClientConfig::builder();
 
     let config = if tls.insecure_skip_verify {
@@ -105,10 +105,10 @@ fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
 fn load_client_identity(
     tls: &TlsArgs,
 ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
-    match (&tls.client_cert, &tls.client_key) {
+    match (&tls.cert, &tls.key) {
         (None, None) => Ok(None),
         (Some(_), None) | (None, Some(_)) => Err(AppError::invalid_config(
-            "--client-cert and --client-key must be provided together",
+            "--cert and --key must be provided together",
         )),
         (Some(cert_path), Some(key_path)) => {
             let cert_file = File::open(cert_path).map_err(|error| {
