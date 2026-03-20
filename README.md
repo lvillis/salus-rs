@@ -89,7 +89,7 @@ salus grpc --addr 127.0.0.1:50051 --tls --ca /etc/ssl/grpc-ca.pem --server-name 
 Exec:
 
 ```bash
-salus exec --out-contains ok -- /app/bin/check-ready
+salus exec --stdout-contains ok -- /app/bin/check-ready
 ```
 
 File:

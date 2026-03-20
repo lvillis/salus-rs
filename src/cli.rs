@@ -87,14 +87,22 @@ pub struct GrpcArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ExecArgs {
-    #[arg(long = "ok-code", action = ArgAction::Append)]
-    pub ok_code: Vec<i32>,
-    #[arg(long = "out-contains", action = ArgAction::Append)]
-    pub out_contains: Vec<String>,
-    #[arg(long = "err-contains", action = ArgAction::Append)]
-    pub err_contains: Vec<String>,
-    #[arg(long = "max-out", default_value_t = 65_536)]
-    pub max_out: usize,
+    #[arg(long = "exit-code", action = ArgAction::Append, help_heading = "Assertions")]
+    pub exit_code: Vec<i32>,
+    #[arg(
+        long = "stdout-contains",
+        action = ArgAction::Append,
+        help_heading = "Assertions"
+    )]
+    pub stdout_contains: Vec<String>,
+    #[arg(
+        long = "stderr-contains",
+        action = ArgAction::Append,
+        help_heading = "Assertions"
+    )]
+    pub stderr_contains: Vec<String>,
+    #[arg(long = "max-output", default_value_t = 65_536, help_heading = "Limits")]
+    pub max_output: usize,
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<OsString>,
 }

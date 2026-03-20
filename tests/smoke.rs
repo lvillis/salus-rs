@@ -457,7 +457,7 @@ async fn exec_probe_succeeds() {
     let code = salus::main_entry(args(&[
         "salus",
         "exec",
-        "--out-contains",
+        "--stdout-contains",
         "ok",
         "--",
         "sh",
@@ -474,9 +474,9 @@ async fn exec_probe_rejects_zero_output_limit_with_output_assertion() {
     let code = salus::main_entry(args(&[
         "salus",
         "exec",
-        "--out-contains",
+        "--stdout-contains",
         "ok",
-        "--max-out",
+        "--max-output",
         "0",
         "--",
         "sh",
