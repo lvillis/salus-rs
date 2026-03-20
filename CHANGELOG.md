@@ -1,8 +1,17 @@
+## [0.1.5] - 2026-03-20
+
+### 🚀 Features
+
+- Refine CLI naming and env expansion
 ## [0.1.4] - 2026-03-20
 
 ### 🚀 Features
 
 - Add pre-parse env expansion and improve help text
+
+### ⚙️ Miscellaneous Tasks
+
+- Release salus version 0.1.4
 ## [0.1.3] - 2026-03-20
 
 ### ⚙️ Miscellaneous Tasks
