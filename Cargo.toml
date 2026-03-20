@@ -1,0 +1,79 @@
+[package]
+name = "salus"
+version = "0.1.0"
+description = "Single-shot container health check probe runner for Docker and Kubernetes workloads"
+edition = "2024"
+license = "MIT"
+rust-version = "1.94"
+readme = "README.md"
+homepage = "https://github.com/lvillis/salus-rs"
+repository = "https://github.com/lvillis/salus-rs"
+documentation = "https://docs.rs/salus"
+keywords = ["healthcheck", "docker", "kubernetes", "probe", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/assets/salus-logo.svg",
+    "/src/**",
+]
+
+[dependencies]
+# CLI parsing and human-readable duration handling
+clap = { version = "4.6.0", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+humantime = { version = "2.3.0", default-features = false }
+
+# Async runtime plus process / file / network I/O
+tokio = { version = "1.50.0", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+# HTTP / HTTPS probe stack
+http-body-util = { version = "0.1.3", default-features = false }
+hyper = { version = "1.8.1", default-features = false, features = ["client", "http1", "http2"] }
+hyper-rustls = { version = "0.27.7", default-features = false, features = ["http1", "http2", "webpki-tokio", "ring", "tls12"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "http1", "http2", "tokio"] }
+url = { version = "2.5.8", default-features = false, features = ["std"] }
+
+# TLS configuration, PEM parsing, and bundled roots
+rustls = { version = "0.23.0", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pemfile = { version = "2.2.0", default-features = false, features = ["std"] }
+webpki-roots = { version = "1.0.6", default-features = false }
+
+# gRPC health probe client support
+tonic = { version = "0.14.5", default-features = false, features = ["channel", "tls-ring", "tls-webpki-roots"] }
+tonic-health = { version = "0.14.5", default-features = false }
+tower-service = { version = "0.3.3", default-features = false }
+
+# Shared error definitions
+thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Async runtime shared with production code
+tokio = { version = "1.50.0", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+# gRPC / TLS test server support for smoke tests
+tokio-stream = { version = "0.1.18", default-features = false, features = ["net"] }
+tonic = { version = "0.14.5", default-features = false, features = ["router", "server", "tls-ring"] }
+tonic-health = { version = "0.14.5", default-features = false }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+
+[package.metadata.release]
+push = true
+publish = false
+verify = true
+sign-commit = true
+sign-tag = true
+allow-branch = ["main"]
+tag-prefix = ""
+tag-name = "{{prefix}}{{version}}"
+tag-message = "chore: release {{crate_name}} version {{version}}"
+pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}" ]

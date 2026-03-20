@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "[0-9]*.[0-9]*.[0-9]*-*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/salus
+
+jobs:
+  verify:
+    name: Verify native GNU build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify
+        run: |
+          cargo fmt --all --check
+          cargo check --all-features --locked
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-features --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Verify Docker build
+        run: docker build -t salus-release .
+
+  build-binaries:
+    name: Build ${{ matrix.asset_suffix }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset_suffix: linux-x86_64-gnu
+          - target: aarch64-unknown-linux-gnu
+            asset_suffix: linux-aarch64-gnu
+          - target: x86_64-unknown-linux-musl
+            asset_suffix: linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            asset_suffix: linux-aarch64-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          toolchain: 1.94.0
+          args: "--release --locked"
+
+      - name: Package artifact
+        env:
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist package
+          cp "target/${TARGET}/release/salus" package/salus
+          cp LICENSE README.md package/
+          archive_name="salus-${VERSION}-${ASSET_SUFFIX}.tar.gz"
+          tar -czf "dist/${archive_name}" -C package salus LICENSE README.md
+          (
+            cd dist
+            sha256sum "${archive_name}" > "${archive_name}.sha256"
+          )
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate checksum manifest
+        working-directory: dist
+        run: sha256sum *.tar.gz > "salus-${GITHUB_REF_NAME}-sha256sums.txt"
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/salus-*-sha256sums.txt
+
+  publish-container:
+    name: Publish GHCR image
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute container tags
+        id: meta
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          {
+            echo "version=${VERSION}"
+            echo "stable=$([[ "${VERSION}" != *-* ]] && echo true || echo false)"
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${VERSION}"
+            if [[ "${VERSION}" != *-* ]]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=salus
+            org.opencontainers.image.description=Container health check probe runner
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}

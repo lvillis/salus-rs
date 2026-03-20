@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.docs
+target
+.cargo
+.rustup-home
+.cargo-home
+*.log
+*.tmp
+*.temp
