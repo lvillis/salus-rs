@@ -3,3 +3,4 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Init commit
+- Release salus version 0.1.1

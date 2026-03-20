@@ -1,6 +1,6 @@
 [package]
 name = "salus"
-version = "0.1.1"
+version = "0.1.2"
 description = "Single-shot container health check probe runner for Docker and Kubernetes workloads"
 edition = "2024"
 license = "MIT"
