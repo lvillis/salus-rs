@@ -1,8 +1,17 @@
+## [0.1.6] - 2026-03-26
+
+### ⚙️ Miscellaneous Tasks
+
+- Standardize release assets and checksums
 ## [0.1.5] - 2026-03-20
 
 ### 🚀 Features
 
 - Refine CLI naming and env expansion
+
+### ⚙️ Miscellaneous Tasks
+
+- Release salus version 0.1.5
 ## [0.1.4] - 2026-03-20
 
 ### 🚀 Features
