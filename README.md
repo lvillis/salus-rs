@@ -127,6 +127,31 @@ ENTRYPOINT ["/bin/my-app"]
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "--url", "http://127.0.0.1:${PORT}/healthz", "--contains", "ok"]
 ```
 
+## Binary Releases
+
+Binary assets are published on GitHub Releases with a stable, machine-readable naming scheme:
+
+```text
+salus-<version>-linux-<arch>-<libc>.tar.gz
+```
+
+Supported OCI platforms and archive architecture mappings:
+
+| OCI platform | Archive arch | libc variants |
+| --- | --- | --- |
+| `linux/amd64` | `x86_64` | `gnu`, `musl` |
+| `linux/arm64` | `aarch64` | `gnu`, `musl` |
+
+Release archives use a stable flat layout:
+
+```text
+salus
+LICENSE
+README.md
+```
+
+Each release also publishes a `SHA256SUMS` file that covers all released `.tar.gz` assets for that version.
+
 ## Kubernetes
 
 Prefer native `httpGet`, `tcpSocket`, and `grpc` probes for simple cases. Use `exec` with `salus` when you need stricter TLS controls, file checks, process-based checks, or richer assertions.

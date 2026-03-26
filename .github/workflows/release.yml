@@ -86,16 +86,12 @@ jobs:
           cp LICENSE README.md package/
           archive_name="salus-${VERSION}-${ASSET_SUFFIX}.tar.gz"
           tar -czf "dist/${archive_name}" -C package salus LICENSE README.md
-          (
-            cd dist
-            sha256sum "${archive_name}" > "${archive_name}.sha256"
-          )
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.asset_suffix }}
-          path: dist/*
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -103,6 +99,9 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
@@ -112,15 +111,62 @@ jobs:
 
       - name: Generate checksum manifest
         working-directory: dist
-        run: sha256sum *.tar.gz > "salus-${GITHUB_REF_NAME}-sha256sums.txt"
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          awk -v version="${VERSION}" '
+            $0 ~ "^## \\[" version "\\]" { found = 1 }
+            found && $0 ~ "^## \\[" version "\\]" { print; next }
+            found && $0 ~ "^## \\[" { exit }
+            found { print }
+          ' CHANGELOG.md > dist/CHANGELOG_SECTION.md
+
+          if [[ ! -s dist/CHANGELOG_SECTION.md ]]; then
+            echo "failed to locate CHANGELOG entry for ${VERSION}" >&2
+            exit 1
+          fi
+
+          cat > dist/RELEASE_NOTES.md <<EOF
+          # salus ${VERSION}
+
+          ## Binary Platforms
+
+          - \`linux/amd64\` -> \`x86_64\`
+          - \`linux/arm64\` -> \`aarch64\`
+          - Binary assets are published for both \`gnu\` and \`musl\` Linux targets.
+
+          ## Asset Naming
+
+          - \`salus-${VERSION}-linux-<arch>-<libc>.tar.gz\`
+
+          ## Archive Layout
+
+          - Flat root layout with exactly:
+          - \`salus\`
+          - \`LICENSE\`
+          - \`README.md\`
+
+          ## Checksums
+
+          - Verify downloaded archives with the attached \`SHA256SUMS\` file.
+
+          ## Changelog
+
+          EOF
+
+          cat dist/CHANGELOG_SECTION.md >> dist/RELEASE_NOTES.md
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
-            dist/*.tar.gz.sha256
-            dist/salus-*-sha256sums.txt
+            dist/SHA256SUMS
+          body_path: dist/RELEASE_NOTES.md
+          overwrite_files: false
 
   publish-container:
     name: Publish GHCR image
