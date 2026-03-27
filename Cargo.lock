@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "salus"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "clap",
  "http-body-util",

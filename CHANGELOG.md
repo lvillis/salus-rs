@@ -1,8 +1,18 @@
+## [0.1.7] - 2026-03-27
+
+### 🚀 Features
+
+- Add max-latency and stricter HTTP assertions
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Clarify env expansion and timing semantics
 ## [0.1.6] - 2026-03-26
 
 ### ⚙️ Miscellaneous Tasks
 
 - Standardize release assets and checksums
+- Release salus version 0.1.6
 ## [0.1.5] - 2026-03-20
 
 ### 🚀 Features
