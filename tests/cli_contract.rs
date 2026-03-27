@@ -56,6 +56,12 @@ fn help_exits_zero_and_prints_to_stdout() {
     assert_eq!(output.status.code(), Some(0));
     assert!(stdout.contains("Container health check probe runner"));
     assert!(stdout.contains("--max-latency <MAX_LATENCY>"));
+    assert!(
+        stdout.contains(
+            "Argument values support ${VAR} and ${VAR:-default} expansion before parsing."
+        )
+    );
+    assert!(stdout.contains("Use $$ to keep a literal $ character in JSON-array commands."));
     assert!(stdout.contains("http  Probe an HTTP or HTTPS health endpoint"));
     assert!(stdout.contains("tcp   Probe TCP connectivity to an address"));
     assert!(stdout.contains("grpc  Run a gRPC health check probe"));
@@ -89,6 +95,11 @@ fn http_help_groups_options_by_concern() {
     assert!(assertions < tls);
     assert!(tls < limits);
     assert!(stdout.contains("--header <HEADER>"));
+    assert!(
+        stdout.contains(
+            "Argument values support ${VAR} and ${VAR:-default} expansion before parsing."
+        )
+    );
     assert!(stdout.contains("--header-present <HEADER_PRESENT>"));
     assert!(stdout.contains("--header-equals <HEADER_EQUALS>"));
     assert!(stdout.contains("--contains <CONTAINS>"));

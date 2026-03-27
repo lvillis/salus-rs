@@ -4,8 +4,17 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 
 use crate::error::{AppError, Result};
 
+const ENV_EXPANSION_AFTER_HELP: &str = "\
+Argument values support ${VAR} and ${VAR:-default} expansion before parsing.
+Use $$ to keep a literal $ character in JSON-array commands.";
+
 #[derive(Debug, Clone, Parser)]
-#[command(name = "salus", version, about = "Container health check probe runner")]
+#[command(
+    name = "salus",
+    version,
+    about = "Container health check probe runner",
+    after_help = ENV_EXPANSION_AFTER_HELP
+)]
 pub struct Cli {
     #[arg(long, global = true, default_value = "3s", value_parser = parse_duration)]
     pub timeout: Duration,
@@ -34,6 +43,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ENV_EXPANSION_AFTER_HELP)]
 pub struct HttpArgs {
     #[arg(long, help_heading = "Target")]
     pub url: Option<String>,

@@ -63,6 +63,14 @@ flowchart LR
 - `3`: invalid arguments or configuration
 - `4`: internal error
 
+## Timing Semantics
+
+`--timeout` is a hard execution deadline for the whole probe. If the probe does not finish before that limit, `salus` returns a probe failure.
+
+`--max-latency` is a health threshold, not a timeout. The probe may still complete successfully at the protocol level, but `salus` will return a probe failure if the observed end-to-end latency exceeds the configured threshold.
+
+Use `--timeout` to cap total waiting time. Use `--max-latency` when a slow dependency should already count as unhealthy even though it still responds.
+
 ## Examples
 
 HTTP:
