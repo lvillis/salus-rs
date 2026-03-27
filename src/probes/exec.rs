@@ -129,13 +129,13 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
         }
     }
 
-    Ok(ProbeReport {
-        mode: "exec",
-        target: command_label,
-        detail: Some(format!("exit_code={code}")),
+    Ok(ProbeReport::new(
+        "exec",
+        command_label,
+        Some(format!("exit_code={code}")),
         started,
         cli,
-    })
+    ))
 }
 
 async fn read_limited<R>(mut reader: R, limit: usize) -> Result<Vec<u8>>

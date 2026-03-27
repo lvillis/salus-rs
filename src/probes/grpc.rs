@@ -117,13 +117,13 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
             )));
         }
 
-        Ok::<_, AppError>(ProbeReport {
-            mode: "grpc",
+        Ok::<_, AppError>(ProbeReport::new(
+            "grpc",
             target,
-            detail: Some("status=SERVING".to_string()),
+            Some("status=SERVING".to_string()),
             started,
-            cli: verbose_cli.clone(),
-        })
+            verbose_cli.clone(),
+        ))
     })
     .await;
 

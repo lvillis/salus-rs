@@ -19,6 +19,7 @@ Supported probe types:
 - Single execution with stable exit codes for Docker `HEALTHCHECK` and Kubernetes `exec` probes
 - Works in minimal container images without requiring a shell
 - Supports strict TLS, custom CAs, client certificates, and SNI / hostname overrides
+- Supports explicit latency thresholds and stricter HTTP response assertions
 - Failure output is optimized for troubleshooting, while successful probes stay quiet by default
 
 ## Architecture
@@ -69,8 +70,9 @@ HTTP:
 ```bash
 salus http --url http://127.0.0.1:8080/healthz
 salus http --url http://127.0.0.1:8080/healthz --header x-api-key:secret
+salus http --url http://127.0.0.1:8080/healthz --header-present x-ready --header-equals x-ready:ok --body-equals ready
 salus http --url https://127.0.0.1:8443/ready --ca /etc/ssl/health-ca.pem --server-name localhost
-salus http --url https://127.0.0.1:8443/ready --ca /etc/ssl/health-ca.pem --server-name localhost --header-contains x-ready:ok --contains ready
+salus --max-latency 250ms http --url https://127.0.0.1:8443/ready --ca /etc/ssl/health-ca.pem --server-name localhost --header-contains x-ready:ok --contains ready
 ```
 
 TCP:

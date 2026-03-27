@@ -44,13 +44,13 @@ pub async fn run(cli: Cli, args: TcpArgs, started: std::time::Instant) -> Result
 
             match tokio::time::timeout(per_attempt, TcpStream::connect(addr)).await {
                 Ok(Ok(_stream)) => {
-                    return Ok::<_, AppError>(ProbeReport {
-                        mode: "tcp",
-                        target: target.clone(),
-                        detail: Some("connected".to_string()),
+                    return Ok::<_, AppError>(ProbeReport::new(
+                        "tcp",
+                        target.clone(),
+                        Some("connected".to_string()),
                         started,
                         cli,
-                    });
+                    ));
                 }
                 Ok(Err(error)) => {
                     last_error = Some(error.to_string());

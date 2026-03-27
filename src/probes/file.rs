@@ -117,13 +117,13 @@ pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Resul
         }
     }
 
-    Ok(ProbeReport {
-        mode: "file",
-        target: args.path.display().to_string(),
-        detail: Some(format!("size={}B", metadata.len())),
+    Ok(ProbeReport::new(
+        "file",
+        args.path.display().to_string(),
+        Some(format!("size={}B", metadata.len())),
         started,
         cli,
-    })
+    ))
 }
 
 struct BufferedFile {

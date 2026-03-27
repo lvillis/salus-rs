@@ -9,6 +9,8 @@ use crate::error::{AppError, Result};
 pub struct Cli {
     #[arg(long, global = true, default_value = "3s", value_parser = parse_duration)]
     pub timeout: Duration,
+    #[arg(long = "max-latency", global = true, value_parser = parse_duration)]
+    pub max_latency: Option<Duration>,
     #[arg(long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
     #[arg(long, global = true, conflicts_with = "quiet")]
@@ -20,7 +22,7 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     #[command(about = "Probe an HTTP or HTTPS health endpoint")]
-    Http(HttpArgs),
+    Http(Box<HttpArgs>),
     #[command(about = "Probe TCP connectivity to an address")]
     Tcp(TcpArgs),
     #[command(about = "Run a gRPC health check probe")]
@@ -47,6 +49,10 @@ pub struct HttpArgs {
     pub host: Option<String>,
     #[arg(long, action = ArgAction::Append, help_heading = "Assertions")]
     pub status: Vec<String>,
+    #[arg(long = "header-present", action = ArgAction::Append, help_heading = "Assertions")]
+    pub header_present: Vec<String>,
+    #[arg(long = "header-equals", action = ArgAction::Append, help_heading = "Assertions")]
+    pub header_equals: Vec<String>,
     #[arg(long = "header-contains", action = ArgAction::Append, help_heading = "Assertions")]
     pub header_contains: Vec<String>,
     #[arg(
@@ -55,6 +61,8 @@ pub struct HttpArgs {
         help_heading = "Assertions"
     )]
     pub header_not_contains: Vec<String>,
+    #[arg(long = "body-equals", help_heading = "Assertions")]
+    pub body_equals: Option<String>,
     #[arg(long = "contains", action = ArgAction::Append, help_heading = "Assertions")]
     pub contains: Vec<String>,
     #[arg(long = "not-contains", action = ArgAction::Append, help_heading = "Assertions")]

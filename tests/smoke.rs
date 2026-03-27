@@ -6,7 +6,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use http_body_util::Full;
@@ -67,6 +67,21 @@ async fn timeout_must_be_greater_than_zero() {
 }
 
 #[tokio::test]
+async fn max_latency_must_be_greater_than_zero() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "--max-latency",
+        "0s",
+        "tcp",
+        "--addr",
+        "127.0.0.1:80",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_succeeds_on_plain_http() {
     let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
 
@@ -81,6 +96,29 @@ async fn http_probe_succeeds_on_plain_http() {
     .await;
 
     assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn http_probe_fails_when_probe_exceeds_max_latency() {
+    let addr = spawn_http_server_with_delay(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        Duration::from_millis(75),
+    )
+    .await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "--timeout",
+        "1s",
+        "--max-latency",
+        "20ms",
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+    ]))
+    .await;
+
+    assert_eq!(code, 1);
 }
 
 #[tokio::test]
@@ -114,6 +152,64 @@ async fn http_probe_sends_header() {
     .await;
 
     assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn http_probe_succeeds_with_exact_header_and_body_assertions() {
+    let addr =
+        spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Ready: ok\r\n\r\nready").await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--header-present",
+        "x-ready",
+        "--header-equals",
+        "x-ready:ok",
+        "--body-equals",
+        "ready",
+    ]))
+    .await;
+
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn http_probe_fails_when_required_response_header_is_missing() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--header-present",
+        "x-ready",
+    ]))
+    .await;
+
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn http_probe_fails_when_response_header_exact_match_is_wrong() {
+    let addr =
+        spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Ready: warming\r\n\r\nready")
+            .await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--header-equals",
+        "x-ready:ok",
+    ]))
+    .await;
+
+    assert_eq!(code, 1);
 }
 
 #[tokio::test]
@@ -326,6 +422,31 @@ async fn http_probe_fails_when_negative_body_assertion_truncates() {
         "4",
         "--not-contains",
         "zzz",
+    ]))
+    .await;
+
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn http_probe_fails_when_exact_body_assertion_truncates() {
+    let body = "ready-after-prefix";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let addr = spawn_http_server(&response).await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--max-body",
+        "5",
+        "--body-equals",
+        "ready",
     ]))
     .await;
 
@@ -666,6 +787,22 @@ async fn spawn_http_server(response: &str) -> SocketAddr {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buffer = [0_u8; 4096];
         let _ = stream.read(&mut buffer).await;
+        let _ = stream.write_all(response.as_bytes()).await;
+    });
+
+    addr
+}
+
+async fn spawn_http_server_with_delay(response: &str, delay: Duration) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let response = response.to_string();
+
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer).await;
+        tokio::time::sleep(delay).await;
         let _ = stream.write_all(response.as_bytes()).await;
     });
 

@@ -55,6 +55,8 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 
     let method = parse_method(&args.method)?;
     let headers = parse_headers(&args.header)?;
+    let header_present = parse_header_names(&args.header_present)?;
+    let header_equals = parse_header_assertions(&args.header_equals)?;
     let header_contains = parse_header_assertions(&args.header_contains)?;
     let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
     let host = default_host_header(&url, args.host.as_deref())?;
@@ -110,69 +112,38 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 
         assert_response_headers(
             &response_headers,
+            &header_present,
+            &header_equals,
             &header_contains,
             &header_not_contains,
             &raw_url,
         )?;
 
-        if args.contains.is_empty() && args.not_contains.is_empty() {
-            return Ok::<_, AppError>(ProbeReport {
-                mode: "http",
-                target: raw_url.clone(),
-                detail: Some(format!("status={status}")),
+        if !has_body_assertions(&args) {
+            return Ok::<_, AppError>(ProbeReport::new(
+                "http",
+                raw_url.clone(),
+                Some(format!("status={status}")),
                 started,
-                cli: verbose_cli.clone(),
-            });
+                verbose_cli.clone(),
+            ));
         }
 
         let body = read_body(
             response.into_body(),
             args.max_body,
-            !args.not_contains.is_empty(),
+            requires_complete_body(&args),
         )
         .await?;
+        assert_response_body(&body, &args, &raw_url)?;
 
-        let body_text = String::from_utf8_lossy(&body.bytes);
-
-        for needle in &args.contains {
-            if !body_text.contains(needle) {
-                if body.truncated {
-                    return Err(AppError::failure(format!(
-                        "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
-                        raw_url,
-                        args.max_body,
-                        needle
-                    )));
-                }
-                return Err(AppError::failure(format!(
-                    "response body from {} does not contain required text {:?}",
-                    raw_url, needle
-                )));
-            }
-        }
-
-        if body.truncated && !args.not_contains.is_empty() {
-            return Err(AppError::failure(
-                "response body was truncated, cannot prove negative body assertions",
-            ));
-        }
-
-        for needle in &args.not_contains {
-            if body_text.contains(needle) {
-                return Err(AppError::failure(format!(
-                    "response body from {} contains forbidden text {:?}",
-                    raw_url, needle
-                )));
-            }
-        }
-
-        Ok::<_, AppError>(ProbeReport {
-            mode: "http",
-            target: raw_url.clone(),
-            detail: Some(format!("status={status}")),
+        Ok::<_, AppError>(ProbeReport::new(
+            "http",
+            raw_url.clone(),
+            Some(format!("status={status}")),
             started,
-            cli: verbose_cli.clone(),
-        })
+            verbose_cli.clone(),
+        ))
     })
     .await;
 
@@ -200,6 +171,8 @@ async fn run_unix_socket(
 
     let method = parse_method(&args.method)?;
     let headers = parse_headers(&args.header)?;
+    let header_present = parse_header_names(&args.header_present)?;
+    let header_equals = parse_header_assertions(&args.header_equals)?;
     let header_contains = parse_header_assertions(&args.header_contains)?;
     let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
     let host = args.host.clone().unwrap_or_else(|| "localhost".to_string());
@@ -253,68 +226,38 @@ async fn run_unix_socket(
 
         assert_response_headers(
             &response_headers,
+            &header_present,
+            &header_equals,
             &header_contains,
             &header_not_contains,
             &target,
         )?;
 
-        if args.contains.is_empty() && args.not_contains.is_empty() {
-            return Ok::<_, AppError>(ProbeReport {
-                mode: "http",
+        if !has_body_assertions(&args) {
+            return Ok::<_, AppError>(ProbeReport::new(
+                "http",
                 target,
-                detail: Some(format!("status={status}")),
+                Some(format!("status={status}")),
                 started,
-                cli: verbose_cli.clone(),
-            });
+                verbose_cli.clone(),
+            ));
         }
 
         let body = read_body(
             response.into_body(),
             args.max_body,
-            !args.not_contains.is_empty(),
+            requires_complete_body(&args),
         )
         .await?;
-        let body_text = String::from_utf8_lossy(&body.bytes);
+        assert_response_body(&body, &args, &target)?;
 
-        for needle in &args.contains {
-            if !body_text.contains(needle) {
-                if body.truncated {
-                    return Err(AppError::failure(format!(
-                        "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
-                        target,
-                        args.max_body,
-                        needle
-                    )));
-                }
-                return Err(AppError::failure(format!(
-                    "response body from {} does not contain required text {:?}",
-                    target, needle
-                )));
-            }
-        }
-
-        if body.truncated && !args.not_contains.is_empty() {
-            return Err(AppError::failure(
-                "response body was truncated, cannot prove negative body assertions",
-            ));
-        }
-
-        for needle in &args.not_contains {
-            if body_text.contains(needle) {
-                return Err(AppError::failure(format!(
-                    "response body from {} contains forbidden text {:?}",
-                    target, needle
-                )));
-            }
-        }
-
-        Ok::<_, AppError>(ProbeReport {
-            mode: "http",
+        Ok::<_, AppError>(ProbeReport::new(
+            "http",
             target,
-            detail: Some(format!("status={status}")),
+            Some(format!("status={status}")),
             started,
-            cli: verbose_cli.clone(),
-        })
+            verbose_cli.clone(),
+        ))
     })
     .await;
 
@@ -350,13 +293,13 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
         ));
     }
 
-    if args.max_body == 0 && (!args.contains.is_empty() || !args.not_contains.is_empty()) {
+    if args.max_body == 0 && has_body_assertions(args) {
         return Err(AppError::invalid_config(
             "--max-body must be greater than 0 when body assertions are used",
         ));
     }
 
-    if args.method == "HEAD" && (!args.contains.is_empty() || !args.not_contains.is_empty()) {
+    if args.method == "HEAD" && has_body_assertions(args) {
         return Err(AppError::invalid_config(
             "HTTP body assertions are not supported with HEAD requests",
         ));
@@ -398,6 +341,17 @@ fn parse_headers(raw_headers: &[String]) -> Result<Vec<(HeaderName, HeaderValue)
         headers.push((name, value));
     }
     Ok(headers)
+}
+
+fn parse_header_names(raw_names: &[String]) -> Result<Vec<HeaderName>> {
+    let mut names = Vec::with_capacity(raw_names.len());
+    for raw in raw_names {
+        let name = HeaderName::from_bytes(raw.trim().as_bytes()).map_err(|error| {
+            AppError::invalid_config(format!("invalid header name {raw:?}: {error}"))
+        })?;
+        names.push(name);
+    }
+    Ok(names)
 }
 
 fn parse_header_assertions(raw_assertions: &[String]) -> Result<Vec<HeaderAssertion>> {
@@ -509,10 +463,34 @@ struct HeaderAssertion {
 
 fn assert_response_headers(
     headers: &HeaderMap,
+    present_assertions: &[HeaderName],
+    equals_assertions: &[HeaderAssertion],
     contains_assertions: &[HeaderAssertion],
     not_contains_assertions: &[HeaderAssertion],
     target: &str,
 ) -> Result<()> {
+    for name in present_assertions {
+        if headers.get(name).is_none() {
+            return Err(AppError::failure(format!(
+                "response header {} is missing from {}",
+                name, target
+            )));
+        }
+    }
+
+    for assertion in equals_assertions {
+        let matches = headers
+            .get_all(&assertion.name)
+            .iter()
+            .any(|value| String::from_utf8_lossy(value.as_bytes()) == assertion.value);
+        if !matches {
+            return Err(AppError::failure(format!(
+                "response header {} from {} does not equal required value {:?}",
+                assertion.name, target, assertion.value
+            )));
+        }
+    }
+
     for assertion in contains_assertions {
         let matches = headers
             .get_all(&assertion.name)
@@ -545,6 +523,65 @@ fn assert_response_headers(
 struct BufferedBody {
     bytes: Vec<u8>,
     truncated: bool,
+}
+
+fn has_body_assertions(args: &HttpArgs) -> bool {
+    args.body_equals.is_some() || !args.contains.is_empty() || !args.not_contains.is_empty()
+}
+
+fn requires_complete_body(args: &HttpArgs) -> bool {
+    args.body_equals.is_some() || !args.not_contains.is_empty()
+}
+
+fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> Result<()> {
+    let body_text = String::from_utf8_lossy(&body.bytes);
+
+    if let Some(expected) = &args.body_equals {
+        if body.truncated {
+            return Err(AppError::failure(format!(
+                "response body from {} was truncated at {} bytes, cannot prove exact body match",
+                target, args.max_body
+            )));
+        }
+        if body_text != expected.as_str() {
+            return Err(AppError::failure(format!(
+                "response body from {} does not equal required text {:?}",
+                target, expected
+            )));
+        }
+    }
+
+    for needle in &args.contains {
+        if !body_text.contains(needle) {
+            if body.truncated {
+                return Err(AppError::failure(format!(
+                    "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
+                    target, args.max_body, needle
+                )));
+            }
+            return Err(AppError::failure(format!(
+                "response body from {} does not contain required text {:?}",
+                target, needle
+            )));
+        }
+    }
+
+    if body.truncated && !args.not_contains.is_empty() {
+        return Err(AppError::failure(
+            "response body was truncated, cannot prove negative body assertions",
+        ));
+    }
+
+    for needle in &args.not_contains {
+        if body_text.contains(needle) {
+            return Err(AppError::failure(format!(
+                "response body from {} contains forbidden text {:?}",
+                target, needle
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 async fn read_body(

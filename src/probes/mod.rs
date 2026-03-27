@@ -12,7 +12,7 @@ use crate::{
 
 pub async fn run(cli: &Cli, started: std::time::Instant) -> Result<ProbeReport> {
     match &cli.command {
-        Command::Http(args) => http::run(cli.clone(), args.clone(), started).await,
+        Command::Http(args) => http::run(cli.clone(), args.as_ref().clone(), started).await,
         Command::Tcp(args) => tcp::run(cli.clone(), args.clone(), started).await,
         Command::Grpc(args) => grpc::run(cli.clone(), args.clone(), started).await,
         Command::Exec(args) => exec::run(cli.clone(), args.clone(), started).await,
