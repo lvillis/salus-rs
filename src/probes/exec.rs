@@ -6,12 +6,16 @@ use tokio::{
 };
 
 use crate::{
-    cli::{Cli, ExecArgs},
+    cli::ExecArgs,
     error::{AppError, Result},
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
 };
 
-pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Result<ProbeReport> {
+pub async fn run(
+    options: ProbeOptions,
+    args: &ExecArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
     if args.max_output == 0
         && (!args.stdout_contains.is_empty() || !args.stderr_contains.is_empty())
     {
@@ -20,13 +24,13 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
         ));
     }
 
-    let success_codes = if args.exit_code.is_empty() {
-        vec![0]
+    let success_codes: &[i32] = if args.exit_code.is_empty() {
+        &[0]
     } else {
-        args.exit_code.clone()
+        &args.exit_code
     };
 
-    for code in &success_codes {
+    for code in success_codes {
         if !(0..=255).contains(code) {
             return Err(AppError::invalid_config(format!(
                 "invalid exit code {code}, expected 0..=255"
@@ -37,11 +41,10 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
     let program = args
         .command
         .first()
-        .ok_or_else(|| AppError::invalid_config("missing command to execute"))?
-        .clone();
-    let command_label = os_string_lossy(&program);
+        .ok_or_else(|| AppError::invalid_config("missing command to execute"))?;
+    let command_label = os_string_lossy(program);
 
-    let mut command = Command::new(&program);
+    let mut command = Command::new(program);
     command.args(args.command.iter().skip(1));
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -68,7 +71,7 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
     let stdout_task = tokio::spawn(read_limited(stdout, args.max_output));
     let stderr_task = tokio::spawn(read_limited(stderr, args.max_output));
 
-    let status = match tokio::time::timeout(cli.timeout, child.wait()).await {
+    let status = match tokio::time::timeout(options.timeout, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
             return Err(AppError::internal(format!(
@@ -82,7 +85,7 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
             let _ = stderr_task.await;
             return Err(AppError::failure(format!(
                 "command {command_label} timed out after {}",
-                humantime::format_duration(cli.timeout)
+                humantime::format_duration(options.timeout)
             )));
         }
     };
@@ -134,7 +137,7 @@ pub async fn run(cli: Cli, args: ExecArgs, started: std::time::Instant) -> Resul
         command_label,
         Some(format!("exit_code={code}")),
         started,
-        cli,
+        options,
     ))
 }
 

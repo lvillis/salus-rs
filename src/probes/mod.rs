@@ -7,15 +7,17 @@ pub mod tcp;
 use crate::{
     cli::{Cli, Command},
     error::Result,
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
 };
 
 pub async fn run(cli: &Cli, started: std::time::Instant) -> Result<ProbeReport> {
+    let options = ProbeOptions::from(cli);
+
     match &cli.command {
-        Command::Http(args) => http::run(cli.clone(), args.as_ref().clone(), started).await,
-        Command::Tcp(args) => tcp::run(cli.clone(), args.clone(), started).await,
-        Command::Grpc(args) => grpc::run(cli.clone(), args.clone(), started).await,
-        Command::Exec(args) => exec::run(cli.clone(), args.clone(), started).await,
-        Command::File(args) => file::run(cli.clone(), args.clone(), started).await,
+        Command::Http(args) => http::run(options, args, started).await,
+        Command::Tcp(args) => tcp::run(options, args, started).await,
+        Command::Grpc(args) => grpc::run(options, args, started).await,
+        Command::Exec(args) => exec::run(options, args, started).await,
+        Command::File(args) => file::run(options, args, started).await,
     }
 }

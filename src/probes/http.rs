@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::{
-    HeaderMap, Method, Request, body::Bytes, client::conn::http1, header::HOST, header::HeaderName,
-    header::HeaderValue, header::USER_AGENT,
+    HeaderMap, Method, Request, Response, body::Bytes, body::Incoming, client::conn::http1,
+    header::HOST, header::HeaderName, header::HeaderValue, header::USER_AGENT,
 };
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::{
@@ -14,30 +14,35 @@ use tokio::net::UnixStream;
 use url::Url;
 
 use crate::{
-    cli::{Cli, HttpArgs, TlsArgs},
+    cli::{HttpArgs, TlsArgs},
     error::{AppError, Result},
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
     tls::{build_http_tls_config, parse_server_name_override},
 };
 
 const USER_AGENT_VALUE: &str = concat!("salus/", env!("CARGO_PKG_VERSION"));
 
-pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Result<ProbeReport> {
-    validate_http_args(&args)?;
+pub async fn run(
+    options: ProbeOptions,
+    args: &HttpArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
+    validate_http_args(args)?;
+    let prepared = PreparedHttpArgs::from_args(args)?;
 
-    if let Some(sock) = args.sock.clone() {
+    if let Some(sock) = args.sock.as_ref() {
         let path = args
             .path
-            .clone()
+            .as_deref()
             .ok_or_else(|| AppError::invalid_config("--path is required with --sock"))?;
-        return run_unix_socket(cli, args, sock, path, started).await;
+        return run_unix_socket(options, args, prepared, sock, path, started).await;
     }
 
     let raw_url = args
         .url
-        .clone()
+        .as_deref()
         .ok_or_else(|| AppError::invalid_config("--url is required when --sock is not set"))?;
-    let url = Url::parse(&raw_url)
+    let url = Url::parse(raw_url)
         .map_err(|error| AppError::invalid_config(format!("invalid URL {raw_url}: {error}")))?;
 
     if !matches!(url.scheme(), "http" | "https") {
@@ -53,14 +58,7 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
         ));
     }
 
-    let method = parse_method(&args.method)?;
-    let headers = parse_headers(&args.header)?;
-    let header_present = parse_header_names(&args.header_present)?;
-    let header_equals = parse_header_assertions(&args.header_equals)?;
-    let header_contains = parse_header_assertions(&args.header_contains)?;
-    let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
     let host = default_host_header(&url, args.host.as_deref())?;
-    let status_ranges = parse_status_ranges(&args.status)?;
     let uses_tls = url.scheme() == "https";
 
     if !uses_tls && has_tls_flags(&args.tls) {
@@ -69,81 +67,14 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
         ));
     }
 
-    let timeout = cli.timeout;
-    let verbose_cli = cli.clone();
+    let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
-        let tls_config = build_http_tls_config(&args.tls)?;
-        let builder = HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_or_http();
-        let builder = match args.tls.server_name.as_deref() {
-            Some(server_name) => builder.with_server_name_resolver(FixedServerNameResolver::new(
-                parse_server_name_override(server_name)?,
-            )),
-            None => builder,
-        };
-        let https = builder.enable_http1().enable_http2().build();
-        let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
-
-        let mut builder = Request::builder().method(method).uri(raw_url.as_str());
-        builder = builder.header(HOST, host);
-        builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
-
-        for (name, value) in headers {
-            builder = builder.header(name, value);
-        }
-
-        let request = builder
-            .body(Empty::new())
-            .map_err(|error| AppError::invalid_config(format!("invalid HTTP request: {error}")))?;
-
+        let client = build_http_client(&args.tls)?;
+        let request = build_request(raw_url, &host, &prepared)?;
         let response = client.request(request).await.map_err(|error| {
             AppError::failure(format!("HTTP request to {raw_url} failed: {error}"))
         })?;
-        let status = response.status().as_u16();
-        let response_headers = response.headers().clone();
-
-        if !status_ranges.matches(status) {
-            return Err(AppError::failure(format!(
-                "HTTP status {} from {} is outside the allowed range",
-                status, raw_url
-            )));
-        }
-
-        assert_response_headers(
-            &response_headers,
-            &header_present,
-            &header_equals,
-            &header_contains,
-            &header_not_contains,
-            &raw_url,
-        )?;
-
-        if !has_body_assertions(&args) {
-            return Ok::<_, AppError>(ProbeReport::new(
-                "http",
-                raw_url.clone(),
-                Some(format!("status={status}")),
-                started,
-                verbose_cli.clone(),
-            ));
-        }
-
-        let body = read_body(
-            response.into_body(),
-            args.max_body,
-            requires_complete_body(&args),
-        )
-        .await?;
-        assert_response_body(&body, &args, &raw_url)?;
-
-        Ok::<_, AppError>(ProbeReport::new(
-            "http",
-            raw_url.clone(),
-            Some(format!("status={status}")),
-            started,
-            verbose_cli.clone(),
-        ))
+        evaluate_response(response, raw_url, args, &prepared, started, options).await
     })
     .await;
 
@@ -157,10 +88,11 @@ pub async fn run(cli: Cli, args: HttpArgs, started: std::time::Instant) -> Resul
 }
 
 async fn run_unix_socket(
-    cli: Cli,
-    args: HttpArgs,
-    sock: PathBuf,
-    path: String,
+    options: ProbeOptions,
+    args: &HttpArgs,
+    prepared: PreparedHttpArgs,
+    sock: &Path,
+    path: &str,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
     if !path.starts_with('/') {
@@ -169,20 +101,12 @@ async fn run_unix_socket(
         ));
     }
 
-    let method = parse_method(&args.method)?;
-    let headers = parse_headers(&args.header)?;
-    let header_present = parse_header_names(&args.header_present)?;
-    let header_equals = parse_header_assertions(&args.header_equals)?;
-    let header_contains = parse_header_assertions(&args.header_contains)?;
-    let header_not_contains = parse_header_assertions(&args.header_not_contains)?;
-    let host = args.host.clone().unwrap_or_else(|| "localhost".to_string());
-    let status_ranges = parse_status_ranges(&args.status)?;
+    let host = args.host.as_deref().unwrap_or("localhost");
     let target = format!("unix:{}{}", sock.display(), path);
 
-    let timeout = cli.timeout;
-    let verbose_cli = cli.clone();
+    let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
-        let stream = UnixStream::connect(&sock).await.map_err(|error| {
+        let stream = UnixStream::connect(sock).await.map_err(|error| {
             AppError::failure(format!(
                 "failed to connect to unix socket {}: {error}",
                 sock.display()
@@ -196,68 +120,14 @@ async fn run_unix_socket(
             let _ = connection.await;
         });
 
-        let mut builder = Request::builder().method(method).uri(path.as_str());
-        builder = builder.header(HOST, host);
-        builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
-
-        for (name, value) in headers {
-            builder = builder.header(name, value);
-        }
-
-        let request = builder
-            .body(Empty::new())
-            .map_err(|error| AppError::invalid_config(format!("invalid HTTP request: {error}")))?;
-
+        let request = build_request(path, host, &prepared)?;
         let response = sender.send_request(request).await.map_err(|error| {
             AppError::failure(format!(
                 "HTTP request over unix socket {} failed: {error}",
                 sock.display()
             ))
         })?;
-        let status = response.status().as_u16();
-        let response_headers = response.headers().clone();
-
-        if !status_ranges.matches(status) {
-            return Err(AppError::failure(format!(
-                "HTTP status {} from {} is outside the allowed range",
-                status, target
-            )));
-        }
-
-        assert_response_headers(
-            &response_headers,
-            &header_present,
-            &header_equals,
-            &header_contains,
-            &header_not_contains,
-            &target,
-        )?;
-
-        if !has_body_assertions(&args) {
-            return Ok::<_, AppError>(ProbeReport::new(
-                "http",
-                target,
-                Some(format!("status={status}")),
-                started,
-                verbose_cli.clone(),
-            ));
-        }
-
-        let body = read_body(
-            response.into_body(),
-            args.max_body,
-            requires_complete_body(&args),
-        )
-        .await?;
-        assert_response_body(&body, &args, &target)?;
-
-        Ok::<_, AppError>(ProbeReport::new(
-            "http",
-            target,
-            Some(format!("status={status}")),
-            started,
-            verbose_cli.clone(),
-        ))
+        evaluate_response(response, &target, args, &prepared, started, options).await
     })
     .await;
 
@@ -314,6 +184,93 @@ fn has_tls_flags(tls: &TlsArgs) -> bool {
         || tls.key.is_some()
         || tls.server_name.is_some()
         || tls.insecure_skip_verify
+}
+
+fn build_http_client(
+    tls: &TlsArgs,
+) -> Result<
+    Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Empty<Bytes>,
+    >,
+> {
+    let tls_config = build_http_tls_config(tls)?;
+    let builder = HttpsConnectorBuilder::new()
+        .with_tls_config(tls_config)
+        .https_or_http();
+    let builder = match tls.server_name.as_deref() {
+        Some(server_name) => builder.with_server_name_resolver(FixedServerNameResolver::new(
+            parse_server_name_override(server_name)?,
+        )),
+        None => builder,
+    };
+    let https = builder.enable_http1().enable_http2().build();
+    Ok(Client::builder(TokioExecutor::new()).build(https))
+}
+
+fn build_request(
+    uri: &str,
+    host: &str,
+    prepared: &PreparedHttpArgs,
+) -> Result<Request<Empty<Bytes>>> {
+    let mut builder = Request::builder().method(&prepared.method).uri(uri);
+    builder = builder.header(HOST, host);
+    builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
+
+    for (name, value) in &prepared.headers {
+        builder = builder.header(name, value);
+    }
+
+    builder
+        .body(Empty::new())
+        .map_err(|error| AppError::invalid_config(format!("invalid HTTP request: {error}")))
+}
+
+async fn evaluate_response(
+    response: Response<Incoming>,
+    target: &str,
+    args: &HttpArgs,
+    prepared: &PreparedHttpArgs,
+    started: std::time::Instant,
+    options: ProbeOptions,
+) -> Result<ProbeReport> {
+    let status = response.status().as_u16();
+    let response_headers = response.headers().clone();
+
+    if !prepared.status_ranges.matches(status) {
+        return Err(AppError::failure(format!(
+            "HTTP status {} from {} is outside the allowed range",
+            status, target
+        )));
+    }
+
+    assert_response_headers(&response_headers, &prepared.header_assertions, target)?;
+
+    if !has_body_assertions(args) {
+        return Ok(ProbeReport::new(
+            "http",
+            target.to_string(),
+            Some(format!("status={status}")),
+            started,
+            options,
+        ));
+    }
+
+    let body = read_body(
+        response.into_body(),
+        args.max_body,
+        requires_complete_body(args),
+    )
+    .await?;
+    assert_response_body(&body, args, target)?;
+
+    Ok(ProbeReport::new(
+        "http",
+        target.to_string(),
+        Some(format!("status={status}")),
+        started,
+        options,
+    ))
 }
 
 fn parse_method(raw: &str) -> Result<Method> {
@@ -461,15 +418,42 @@ struct HeaderAssertion {
     value: String,
 }
 
+struct HeaderAssertions {
+    present: Vec<HeaderName>,
+    equals: Vec<HeaderAssertion>,
+    contains: Vec<HeaderAssertion>,
+    not_contains: Vec<HeaderAssertion>,
+}
+
+struct PreparedHttpArgs {
+    method: Method,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    header_assertions: HeaderAssertions,
+    status_ranges: StatusRanges,
+}
+
+impl PreparedHttpArgs {
+    fn from_args(args: &HttpArgs) -> Result<Self> {
+        Ok(Self {
+            method: parse_method(&args.method)?,
+            headers: parse_headers(&args.header)?,
+            header_assertions: HeaderAssertions {
+                present: parse_header_names(&args.header_present)?,
+                equals: parse_header_assertions(&args.header_equals)?,
+                contains: parse_header_assertions(&args.header_contains)?,
+                not_contains: parse_header_assertions(&args.header_not_contains)?,
+            },
+            status_ranges: parse_status_ranges(&args.status)?,
+        })
+    }
+}
+
 fn assert_response_headers(
     headers: &HeaderMap,
-    present_assertions: &[HeaderName],
-    equals_assertions: &[HeaderAssertion],
-    contains_assertions: &[HeaderAssertion],
-    not_contains_assertions: &[HeaderAssertion],
+    assertions: &HeaderAssertions,
     target: &str,
 ) -> Result<()> {
-    for name in present_assertions {
+    for name in &assertions.present {
         if headers.get(name).is_none() {
             return Err(AppError::failure(format!(
                 "response header {} is missing from {}",
@@ -478,7 +462,7 @@ fn assert_response_headers(
         }
     }
 
-    for assertion in equals_assertions {
+    for assertion in &assertions.equals {
         let matches = headers
             .get_all(&assertion.name)
             .iter()
@@ -491,7 +475,7 @@ fn assert_response_headers(
         }
     }
 
-    for assertion in contains_assertions {
+    for assertion in &assertions.contains {
         let matches = headers
             .get_all(&assertion.name)
             .iter()
@@ -504,7 +488,7 @@ fn assert_response_headers(
         }
     }
 
-    for assertion in not_contains_assertions {
+    for assertion in &assertions.not_contains {
         let matches = headers
             .get_all(&assertion.name)
             .iter()

@@ -3,16 +3,19 @@ use std::time::Duration;
 use tokio::net::{TcpStream, lookup_host};
 
 use crate::{
-    cli::{Cli, TcpArgs},
+    cli::TcpArgs,
     error::{AppError, Result},
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
 };
 
-pub async fn run(cli: Cli, args: TcpArgs, started: std::time::Instant) -> Result<ProbeReport> {
-    let timeout = cli.timeout;
-    let target = args.addr.clone();
+pub async fn run(
+    options: ProbeOptions,
+    args: &TcpArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
+    let timeout = options.timeout;
 
-    let result = tokio::time::timeout(timeout, async move {
+    let result = tokio::time::timeout(timeout, async {
         let addrs = lookup_host(&args.addr)
             .await
             .map_err(|error| match error.kind() {
@@ -46,10 +49,10 @@ pub async fn run(cli: Cli, args: TcpArgs, started: std::time::Instant) -> Result
                 Ok(Ok(_stream)) => {
                     return Ok::<_, AppError>(ProbeReport::new(
                         "tcp",
-                        target.clone(),
+                        args.addr.clone(),
                         Some("connected".to_string()),
                         started,
-                        cli,
+                        options,
                     ));
                 }
                 Ok(Err(error)) => {

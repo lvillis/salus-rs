@@ -3,12 +3,16 @@ use std::time::SystemTime;
 use tokio::io::AsyncReadExt;
 
 use crate::{
-    cli::{Cli, FileArgs},
+    cli::FileArgs,
     error::{AppError, Result},
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
 };
 
-pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Result<ProbeReport> {
+pub async fn run(
+    options: ProbeOptions,
+    args: &FileArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
     if let (Some(min_size), Some(max_size)) = (args.min_size, args.max_size)
         && min_size > max_size
     {
@@ -122,7 +126,7 @@ pub async fn run(cli: Cli, args: FileArgs, started: std::time::Instant) -> Resul
         args.path.display().to_string(),
         Some(format!("size={}B", metadata.len())),
         started,
-        cli,
+        options,
     ))
 }
 

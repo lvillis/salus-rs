@@ -36,7 +36,7 @@ where
         }
     };
 
-    match run(cli.clone()).await {
+    match run(&cli).await {
         Ok(report) => match report.enforce_max_latency() {
             Ok(report) => report.print_and_exit_code(),
             Err(error) => error.print_and_exit_code_with_quiet(cli.quiet),
@@ -45,7 +45,7 @@ where
     }
 }
 
-async fn run(cli: Cli) -> Result<ProbeReport> {
+async fn run(cli: &Cli) -> Result<ProbeReport> {
     if cli.timeout.is_zero() {
         return Err(AppError::invalid_config("--timeout must be greater than 0"));
     }
@@ -59,7 +59,7 @@ async fn run(cli: Cli) -> Result<ProbeReport> {
     }
 
     let started = std::time::Instant::now();
-    probes::run(&cli, started).await
+    probes::run(cli, started).await
 }
 
 pub fn command() -> clap::Command {

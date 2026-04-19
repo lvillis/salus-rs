@@ -6,13 +6,32 @@ use crate::{
     error::{AppError, Result},
 };
 
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeOptions {
+    pub timeout: Duration,
+    pub quiet: bool,
+    pub verbose: bool,
+    pub max_latency: Option<Duration>,
+}
+
+impl From<&Cli> for ProbeOptions {
+    fn from(cli: &Cli) -> Self {
+        Self {
+            timeout: cli.timeout,
+            quiet: cli.quiet,
+            verbose: cli.verbose,
+            max_latency: cli.max_latency,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProbeReport {
     pub mode: &'static str,
     pub target: String,
     pub detail: Option<String>,
     pub elapsed: Duration,
-    pub cli: Cli,
+    pub options: ProbeOptions,
 }
 
 impl ProbeReport {
@@ -21,19 +40,19 @@ impl ProbeReport {
         target: String,
         detail: Option<String>,
         started: std::time::Instant,
-        cli: Cli,
+        options: ProbeOptions,
     ) -> Self {
         Self {
             mode,
             target,
             detail,
             elapsed: started.elapsed(),
-            cli,
+            options,
         }
     }
 
     pub fn enforce_max_latency(self) -> Result<Self> {
-        if let Some(limit) = self.cli.max_latency
+        if let Some(limit) = self.options.max_latency
             && self.elapsed > limit
         {
             return Err(AppError::failure(format!(
@@ -49,14 +68,14 @@ impl ProbeReport {
     }
 
     pub fn print_and_exit_code(self) -> i32 {
-        let quiet = self.cli.quiet;
+        let quiet = self.options.quiet;
         self.print_and_exit_code_with_quiet(quiet)
     }
 
     pub fn print_and_exit_code_with_quiet(self, quiet: bool) -> i32 {
         let elapsed = self.elapsed.as_millis();
 
-        if self.cli.verbose && !quiet {
+        if self.options.verbose && !quiet {
             eprintln!(
                 "{}",
                 format_success(self.mode, &self.target, elapsed, self.detail.as_deref())

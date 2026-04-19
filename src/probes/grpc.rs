@@ -14,14 +14,18 @@ use tonic_health::pb::{
 use tower_service::Service;
 
 use crate::{
-    cli::{Cli, GrpcArgs},
+    cli::GrpcArgs,
     error::{AppError, Result},
-    probe::ProbeReport,
+    probe::{ProbeOptions, ProbeReport},
     tls::{build_http_tls_config, parse_server_name_override},
 };
 
-pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Result<ProbeReport> {
-    if !args.tls && has_tls_flags(&args) {
+pub async fn run(
+    options: ProbeOptions,
+    args: &GrpcArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
+    if !args.tls && has_tls_flags(args) {
         return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
     }
 
@@ -32,13 +36,12 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
         _ => args.addr.clone(),
     };
 
-    let timeout = cli.timeout;
-    let verbose_cli = cli.clone();
+    let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
         let mut endpoint = Endpoint::from_shared(endpoint_uri.clone()).map_err(|error| {
             AppError::invalid_config(format!("invalid gRPC endpoint {endpoint_uri}: {error}"))
         })?;
-        endpoint = endpoint.connect_timeout(cli.timeout).timeout(cli.timeout);
+        endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
 
         if let Some(authority) = &args.authority {
             let origin = format!("{request_scheme}://{authority}")
@@ -122,7 +125,7 @@ pub async fn run(cli: Cli, args: GrpcArgs, started: std::time::Instant) -> Resul
             target,
             Some("status=SERVING".to_string()),
             started,
-            verbose_cli.clone(),
+            options,
         ))
     })
     .await;

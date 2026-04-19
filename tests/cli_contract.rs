@@ -1,7 +1,10 @@
 use std::{
     fs,
+    io::{Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Output},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -46,6 +49,26 @@ fn temp_file_path(prefix: &str) -> PathBuf {
 
 fn write_file(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("test file must be writable");
+}
+
+fn spawn_http_server(response: &'static str) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener must bind");
+    let addr = listener
+        .local_addr()
+        .expect("test listener must expose a local address");
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("test server must accept one client");
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+        stream
+            .write_all(response.as_bytes())
+            .expect("test server must write a response");
+    });
+
+    addr
 }
 
 #[test]
@@ -202,6 +225,52 @@ fn environment_variable_defaults_are_supported() {
     assert!(output.stderr.is_empty());
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn environment_variable_expansion_reaches_http_probe_arguments() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    let port = addr.port().to_string();
+
+    let output = run_salus_with_env(
+        &[
+            "http",
+            "--url",
+            "http://127.0.0.1:${SALUS_TEST_HTTP_PORT}/healthz",
+            "--contains",
+            "ok",
+        ],
+        &[("SALUS_TEST_HTTP_PORT", Some(port.as_str()))],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn environment_variable_expansion_reaches_exec_trailing_arguments() {
+    let output = run_salus_with_env(
+        &[
+            "exec",
+            "--stdout-contains",
+            "${SALUS_TEST_EXEC_NEEDLE}",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$1\"",
+            "sh",
+            "${SALUS_TEST_EXEC_VALUE}",
+        ],
+        &[
+            ("SALUS_TEST_EXEC_NEEDLE", Some("ready")),
+            ("SALUS_TEST_EXEC_VALUE", Some("ready")),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
