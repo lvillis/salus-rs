@@ -1,3 +1,12 @@
+## [0.1.8] - 2026-04-23
+
+### 🚀 Features
+
+- Add full and slim release flavors
+
+### 🚜 Refactor
+
+- Streamline probe execution
 ## [0.1.7] - 2026-03-27
 
 ### 🚀 Features
@@ -7,6 +16,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(docs)* Clarify env expansion and timing semantics
+- Release salus version 0.1.7
 ## [0.1.6] - 2026-03-26
 
 ### ⚙️ Miscellaneous Tasks
