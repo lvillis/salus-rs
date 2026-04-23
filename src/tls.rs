@@ -5,6 +5,7 @@ use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
+#[cfg(feature = "webpki")]
 use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::{
@@ -63,6 +64,8 @@ fn build_client_config(tls: &TlsArgs) -> Result<ClientConfig> {
 
 fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
+
+    #[cfg(feature = "webpki")]
     roots.extend(TLS_SERVER_ROOTS.iter().cloned());
 
     if let Some(path) = path {

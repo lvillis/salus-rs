@@ -87,7 +87,11 @@ fn help_exits_zero_and_prints_to_stdout() {
     assert!(stdout.contains("Use $$ to keep a literal $ character in JSON-array commands."));
     assert!(stdout.contains("http  Probe an HTTP or HTTPS health endpoint"));
     assert!(stdout.contains("tcp   Probe TCP connectivity to an address"));
-    assert!(stdout.contains("grpc  Run a gRPC health check probe"));
+    if cfg!(feature = "grpc") {
+        assert!(stdout.contains("grpc  Run a gRPC health check probe"));
+    } else {
+        assert!(!stdout.contains("grpc  Run a gRPC health check probe"));
+    }
     assert!(stdout.contains("exec  Run a command and evaluate its exit code and output"));
     assert!(stdout.contains("file  Probe file state and contents"));
     assert!(output.stderr.is_empty());

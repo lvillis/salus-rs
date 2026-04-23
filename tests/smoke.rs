@@ -20,13 +20,16 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::ServerConfig;
 #[cfg(unix)]
 use tokio::net::UnixListener;
+#[cfg(feature = "grpc")]
+use tokio::sync::oneshot;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::oneshot,
 };
 use tokio_rustls::TlsAcceptor;
+#[cfg(feature = "grpc")]
 use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(feature = "grpc")]
 use tonic_health::ServingStatus;
 
 const TLS_CERT_PEM: &str = include_str!("fixtures/server.pem");
@@ -617,6 +620,7 @@ async fn exec_probe_fails_when_command_is_terminated_by_signal() {
     assert_eq!(code, 1);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_succeeds() {
     let addr = spawn_grpc_server(false).await;
@@ -626,6 +630,7 @@ async fn grpc_probe_succeeds() {
     assert_eq!(code, 0);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_fails_when_service_is_not_serving() {
     let addr =
@@ -644,6 +649,7 @@ async fn grpc_probe_fails_when_service_is_not_serving() {
     assert_eq!(code, 1);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_fails_when_service_is_unregistered() {
     let addr = spawn_grpc_server(false).await;
@@ -661,6 +667,7 @@ async fn grpc_probe_fails_when_service_is_unregistered() {
     assert_eq!(code, 1);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_succeeds_with_tls_ca_file_and_server_name_override() {
     let addr = spawn_grpc_server(true).await;
@@ -681,6 +688,7 @@ async fn grpc_probe_succeeds_with_tls_ca_file_and_server_name_override() {
     assert_eq!(code, 0);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_fails_with_tls_without_trust_override_for_self_signed_server() {
     let addr = spawn_grpc_server(true).await;
@@ -697,6 +705,7 @@ async fn grpc_probe_fails_with_tls_without_trust_override_for_self_signed_server
     assert_eq!(code, 1);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_fails_with_wrong_server_name() {
     let addr = spawn_grpc_server(true).await;
@@ -717,6 +726,7 @@ async fn grpc_probe_fails_with_wrong_server_name() {
     assert_eq!(code, 1);
 }
 
+#[cfg(feature = "grpc")]
 #[tokio::test]
 async fn grpc_probe_succeeds_with_tls_and_insecure_skip_verify() {
     let addr = spawn_grpc_server(true).await;
@@ -734,10 +744,12 @@ async fn grpc_probe_succeeds_with_tls_and_insecure_skip_verify() {
     assert_eq!(code, 0);
 }
 
+#[cfg(feature = "grpc")]
 async fn spawn_grpc_server(tls: bool) -> SocketAddr {
     spawn_grpc_server_with_service_status(tls, None).await
 }
 
+#[cfg(feature = "grpc")]
 async fn spawn_grpc_server_with_service_status(
     tls: bool,
     service_status: Option<(&str, ServingStatus)>,

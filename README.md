@@ -6,13 +6,15 @@
 
 `salus` is a Rust health check tool for Docker and Kubernetes workloads. It provides a single-shot probe execution model that fits container health checks cleanly.
 
-Supported probe types:
+Default `full` builds support:
 
 - `http` / `https`
 - `tcp`
 - `grpc` (standard `grpc.health.v1.Health/Check` only)
 - `exec`
 - `file`
+
+`slim` builds omit the `grpc` subcommand and bundled public root CAs. HTTPS probes remain available, but they require an explicit `--ca` or `--insecure-skip-verify`.
 
 ## Design Goals
 
@@ -89,7 +91,7 @@ TCP:
 salus tcp --addr 127.0.0.1:5432
 ```
 
-gRPC health:
+gRPC health (`full` only):
 
 ```bash
 salus grpc --addr 127.0.0.1:50051
@@ -111,7 +113,10 @@ salus file --path /tmp/ready --non-empty --contains ready
 ## Docker
 
 The production Dockerfile builds a static musl binary and runs it from `scratch`.
-Published images are pushed to `ghcr.io/lvillis/salus:<tag>` and stable tags also update `ghcr.io/lvillis/salus:latest`.
+Published images are pushed in two flavors:
+
+- `ghcr.io/lvillis/salus:<tag>` and `ghcr.io/lvillis/salus:latest` for `full`
+- `ghcr.io/lvillis/salus:<tag>-slim` and `ghcr.io/lvillis/salus:slim` for `slim`
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "--url", "http://127.0.0.1:8080/healthz"]
@@ -131,6 +136,13 @@ HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "
 ENTRYPOINT ["/bin/my-app"]
 ```
 
+Build the local container image in either flavor:
+
+```bash
+docker build -t salus:full .
+docker build --build-arg SALUS_FEATURE_PROFILE=slim -t salus:slim .
+```
+
 `salus` expands `${VAR}` and `${VAR:-default}` inside JSON-array arguments before parsing them, so Docker `HEALTHCHECK CMD [...]` does not need `/bin/sh` just to inject environment variables:
 
 ```dockerfile
@@ -139,10 +151,16 @@ HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD ["/bin/salus", "http", "
 
 ## Binary Releases
 
+Release assets are published in two flavors:
+
+- `full`: includes `grpc` and bundled public root CAs
+- `slim`: omits `grpc` and bundled public root CAs
+
 Binary assets are published on GitHub Releases with a stable, machine-readable naming scheme:
 
 ```text
 salus-<version>-linux-<arch>-<libc>.tar.gz
+salus-<version>-linux-<arch>-<libc>-slim.tar.gz
 ```
 
 Supported OCI platforms and archive architecture mappings:

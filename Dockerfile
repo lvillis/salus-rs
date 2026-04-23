@@ -1,6 +1,7 @@
 FROM --platform=$TARGETPLATFORM rust:1.95.0-bookworm AS builder
 
 ARG TARGETARCH
+ARG SALUS_FEATURE_PROFILE=full
 
 WORKDIR /workspace
 
@@ -19,8 +20,13 @@ RUN set -eux; \
         arm64|aarch64) rust_target="aarch64-unknown-linux-musl" ;; \
         *) echo "unsupported TARGETARCH=${arch}" >&2; exit 1 ;; \
     esac; \
+    case "${SALUS_FEATURE_PROFILE}" in \
+        full) cargo_feature_args="" ;; \
+        slim) cargo_feature_args="--no-default-features" ;; \
+        *) echo "unsupported SALUS_FEATURE_PROFILE=${SALUS_FEATURE_PROFILE}" >&2; exit 1 ;; \
+    esac; \
     rustup target add "${rust_target}"; \
-    cargo build --release --locked --target "${rust_target}"; \
+    cargo build --release --locked --target "${rust_target}" ${cargo_feature_args}; \
     cp "target/${rust_target}/release/salus" /salus
 
 FROM scratch

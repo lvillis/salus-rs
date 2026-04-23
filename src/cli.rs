@@ -34,6 +34,7 @@ pub enum Command {
     Http(Box<HttpArgs>),
     #[command(about = "Probe TCP connectivity to an address")]
     Tcp(TcpArgs),
+    #[cfg(feature = "grpc")]
     #[command(about = "Run a gRPC health check probe")]
     Grpc(GrpcArgs),
     #[command(about = "Run a command and evaluate its exit code and output")]
@@ -89,6 +90,7 @@ pub struct TcpArgs {
     pub addr: String,
 }
 
+#[cfg(feature = "grpc")]
 #[derive(Debug, Clone, Args)]
 pub struct GrpcArgs {
     #[arg(long = "addr")]

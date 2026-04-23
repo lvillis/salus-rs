@@ -1,70 +1,56 @@
 <svg width="960" height="280" viewBox="0 0 960 280" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">salus logo</title>
-  <desc id="desc">A shield and heartbeat-inspired logo for the salus container health check tool.</desc>
+  <desc id="desc">A minimal container-frame and health-signal logo for the salus health check tool.</desc>
 
   <defs>
     <style>
       svg {
-        --canvas: #F6FBF8;
-        --frame: #D7E9DF;
-        --wordmark: #123227;
-        --tagline: #2A6A51;
-        --decor-stroke: #BFDACB;
-        --decor-fill: #2A6A51;
+        --ink: #102c22;
+        --accent: #1d8a5c;
+        --accent-soft: #9fd7bf;
       }
 
       @media (prefers-color-scheme: dark) {
         svg {
-          --canvas: #081510;
-          --frame: #18382C;
-          --wordmark: #F2FBF6;
-          --tagline: #8FD4AD;
-          --decor-stroke: #244A3B;
-          --decor-fill: #6CB88E;
+          --ink: #f1fbf5;
+          --accent: #7ee0ae;
+          --accent-soft: #295742;
         }
       }
     </style>
-    <linearGradient id="bg" x1="56" y1="36" x2="252" y2="232" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0F3D2E"/>
-      <stop offset="1" stop-color="#1E7A57"/>
-    </linearGradient>
-    <linearGradient id="pulse" x1="78" y1="140" x2="230" y2="140" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#F4FFF7"/>
-      <stop offset="1" stop-color="#A7F3C7"/>
-    </linearGradient>
-    <filter id="shadow" x="18" y="10" width="272" height="252" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feOffset dy="8"/>
-      <feGaussianBlur stdDeviation="12"/>
-      <feColorMatrix type="matrix" values="0 0 0 0 0.0588235 0 0 0 0 0.239216 0 0 0 0 0.180392 0 0 0 0.18 0"/>
-      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_1_1"/>
-      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_1_1" result="shape"/>
-    </filter>
   </defs>
 
-  <rect width="960" height="280" rx="28" fill="var(--canvas)"/>
-  <rect x="20" y="20" width="920" height="240" rx="22" stroke="var(--frame)" stroke-width="2"/>
+  <g transform="translate(64 52)">
+    <path
+      d="M48 18H142C160.778 18 176 33.2223 176 52V86M176 120V158C176 176.778 160.778 192 142 192H48C29.2223 192 14 176.778 14 158V52C14 33.2223 29.2223 18 48 18Z"
+      stroke="var(--ink)"
+      stroke-width="8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
 
-  <g filter="url(#shadow)">
-    <path d="M154 36L252 76V136C252 186.908 212.872 227.668 154 244C95.1283 227.668 56 186.908 56 136V76L154 36Z" fill="url(#bg)"/>
-    <path d="M154 60L230 90.5V136C230 175.018 201.06 209.078 154 223.398C106.94 209.078 78 175.018 78 136V90.5L154 60Z" fill="#0B2F24" fill-opacity="0.24" stroke="#89D7AD" stroke-width="2"/>
-    <path d="M94 142H122L136 118L153 167L171 103L186 142H214" stroke="url(#pulse)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M104 92H204" stroke="#3DB57C" stroke-width="7" stroke-linecap="round" opacity="0.9"/>
-    <path d="M104 182H204" stroke="#3DB57C" stroke-width="7" stroke-linecap="round" opacity="0.55"/>
+    <path
+      d="M38 118H72L90 93L113 144L138 78L160 108H194"
+      stroke="var(--accent)"
+      stroke-width="9"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <circle cx="208" cy="108" r="9" fill="var(--accent)" />
+    <circle cx="208" cy="108" r="22" stroke="var(--accent-soft)" stroke-width="4" />
   </g>
 
-  <g fill="var(--wordmark)">
-    <text x="316" y="126" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="88" font-weight="700" letter-spacing="-2">salus</text>
-    <text x="320" y="168" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="26" font-weight="600" letter-spacing="3.2" fill="var(--tagline)">CONTAINER HEALTH CHECKS</text>
-  </g>
-
-  <g stroke="var(--decor-stroke)" stroke-width="3">
-    <path d="M806 74H866"/>
-    <path d="M790 94H882"/>
-    <path d="M822 114H850"/>
-  </g>
-  <g fill="var(--decor-fill)">
-    <circle cx="814" cy="188" r="7"/>
-    <circle cx="844" cy="188" r="7" opacity="0.68"/>
-    <circle cx="874" cy="188" r="7" opacity="0.38"/>
+  <g fill="var(--ink)">
+    <text
+      x="320"
+      y="156"
+      font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+      font-size="94"
+      font-weight="700"
+      letter-spacing="-3"
+    >
+      salus
+    </text>
   </g>
 </svg>

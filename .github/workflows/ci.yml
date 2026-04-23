@@ -33,14 +33,29 @@ jobs:
       - name: Check
         run: cargo check --all-features --locked
 
+      - name: Check slim build
+        run: cargo check --no-default-features --locked
+
       - name: Lint
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Lint slim build
+        run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
 
       - name: Test
         run: cargo test --all-features --locked
 
+      - name: Test slim build
+        run: cargo test --no-default-features --locked
+
       - name: Release build
         run: cargo build --release --locked
 
+      - name: Release slim build
+        run: cargo build --release --locked --no-default-features
+
       - name: Verify Docker build
         run: docker build -t salus-ci .
+
+      - name: Verify slim Docker build
+        run: docker build --build-arg SALUS_FEATURE_PROFILE=slim -t salus-ci-slim .

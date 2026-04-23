@@ -38,14 +38,23 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo check --all-features --locked
+          cargo check --no-default-features --locked
           cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo clippy --all-targets --no-default-features --locked -- -D warnings
           cargo test --all-features --locked
+          cargo test --no-default-features --locked
 
-      - name: Build release binary
+      - name: Build full release binary
         run: cargo build --release --locked
 
-      - name: Verify Docker build
+      - name: Build slim release binary
+        run: cargo build --release --locked --no-default-features
+
+      - name: Verify full Docker build
         run: docker build -t salus-release .
+
+      - name: Verify slim Docker build
+        run: docker build --build-arg SALUS_FEATURE_PROFILE=slim -t salus-release-slim .
 
   build-binaries:
     name: Build ${{ matrix.asset_suffix }}
@@ -57,12 +66,28 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             asset_suffix: linux-x86_64-gnu
+            cargo_args: "--release --locked"
           - target: aarch64-unknown-linux-gnu
             asset_suffix: linux-aarch64-gnu
+            cargo_args: "--release --locked"
           - target: x86_64-unknown-linux-musl
             asset_suffix: linux-x86_64-musl
+            cargo_args: "--release --locked"
           - target: aarch64-unknown-linux-musl
             asset_suffix: linux-aarch64-musl
+            cargo_args: "--release --locked"
+          - target: x86_64-unknown-linux-gnu
+            asset_suffix: linux-x86_64-gnu-slim
+            cargo_args: "--release --locked --no-default-features"
+          - target: aarch64-unknown-linux-gnu
+            asset_suffix: linux-aarch64-gnu-slim
+            cargo_args: "--release --locked --no-default-features"
+          - target: x86_64-unknown-linux-musl
+            asset_suffix: linux-x86_64-musl-slim
+            cargo_args: "--release --locked --no-default-features"
+          - target: aarch64-unknown-linux-musl
+            asset_suffix: linux-aarch64-musl-slim
+            cargo_args: "--release --locked --no-default-features"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,7 +98,7 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           toolchain: 1.95.0
-          args: "--release --locked"
+          args: ${{ matrix.cargo_args }}
 
       - name: Package artifact
         env:
@@ -132,15 +157,22 @@ jobs:
           cat > dist/RELEASE_NOTES.md <<EOF
           # salus ${VERSION}
 
+          ## Binary Flavors
+
+          - \`full\`: includes \`grpc\` and bundled public root CAs.
+          - \`slim\`: omits the \`grpc\` subcommand and bundled public root CAs.
+
           ## Binary Platforms
 
           - \`linux/amd64\` -> \`x86_64\`
           - \`linux/arm64\` -> \`aarch64\`
           - Binary assets are published for both \`gnu\` and \`musl\` Linux targets.
+          - Each platform ships \`full\` and \`slim\` variants.
 
           ## Asset Naming
 
-          - \`salus-${VERSION}-linux-<arch>-<libc>.tar.gz\`
+          - \`salus-${VERSION}-linux-<arch>-<libc>.tar.gz\` for \`full\`
+          - \`salus-${VERSION}-linux-<arch>-<libc>-slim.tar.gz\` for \`slim\`
 
           ## Archive Layout
 
@@ -183,11 +215,16 @@ jobs:
         run: |
           {
             echo "version=${VERSION}"
-            echo "stable=$([[ "${VERSION}" != *-* ]] && echo true || echo false)"
-            echo "tags<<EOF"
+            echo "full_tags<<EOF"
             echo "${IMAGE_NAME}:${VERSION}"
             if [[ "${VERSION}" != *-* ]]; then
               echo "${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+            echo "slim_tags<<EOF"
+            echo "${IMAGE_NAME}:${VERSION}-slim"
+            if [[ "${VERSION}" != *-* ]]; then
+              echo "${IMAGE_NAME}:slim"
             fi
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
@@ -205,17 +242,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push container image
+      - name: Build and push full container image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.full_tags }}
           labels: |
             org.opencontainers.image.title=salus
             org.opencontainers.image.description=Container health check probe runner
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+
+      - name: Build and push slim container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            SALUS_FEATURE_PROFILE=slim
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.slim_tags }}
+          labels: |
+            org.opencontainers.image.title=salus
+            org.opencontainers.image.description=Container health check probe runner (slim)
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
