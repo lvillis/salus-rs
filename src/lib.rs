@@ -19,6 +19,8 @@ mod probe;
 mod probes;
 mod tls;
 
+use std::ffi::{OsStr, OsString};
+
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use cli::Cli;
 use error::{AppError, Result};
@@ -28,11 +30,17 @@ use probe::ProbeReport;
 pub async fn main_entry<I, T>(args: I) -> i32
 where
     I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
+    T: Into<OsString>,
 {
-    let args = match env_expand::expand_argv(args) {
-        Ok(args) => args,
-        Err(error) => return error.print_and_exit_code_with_quiet(false),
+    let raw_args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    let quiet_requested = requests_quiet(&raw_args);
+    let args = if requests_help_or_version(&raw_args) {
+        raw_args
+    } else {
+        match env_expand::expand_argv(raw_args) {
+            Ok(args) => args,
+            Err(error) => return error.print_and_exit_code_with_quiet(quiet_requested),
+        }
     };
 
     let cli = match Cli::try_parse_from(args) {
@@ -42,7 +50,10 @@ where
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
                 _ => 3,
             };
-            print_clap_error(error, code == 0);
+            let success = code == 0;
+            if success || !quiet_requested {
+                print_clap_error(error, success);
+            }
             return code;
         }
     };
@@ -60,6 +71,7 @@ async fn run(cli: &Cli) -> Result<ProbeReport> {
     if cli.timeout.is_zero() {
         return Err(AppError::invalid_config("--timeout must be greater than 0"));
     }
+    probe::deadline_after(cli.timeout)?;
 
     if let Some(max_latency) = cli.max_latency
         && max_latency.is_zero()
@@ -75,4 +87,18 @@ async fn run(cli: &Cli) -> Result<ProbeReport> {
 
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+fn requests_help_or_version(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| arg.as_os_str() != OsStr::new("--"))
+        .any(|arg| matches!(arg.to_str(), Some("-h" | "--help" | "-V" | "--version")))
+}
+
+fn requests_quiet(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| arg.as_os_str() != OsStr::new("--"))
+        .any(|arg| matches!(arg.to_str(), Some("--quiet")))
 }

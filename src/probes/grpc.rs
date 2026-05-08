@@ -5,7 +5,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use hyper::http::{Uri, uri::Scheme};
+use hyper::http::{
+    Uri,
+    uri::{Authority, Scheme},
+};
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use tonic::transport::Endpoint;
 use tonic_health::pb::{
@@ -28,6 +31,7 @@ pub async fn run(
     if !args.tls && has_tls_flags(args) {
         return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
     }
+    validate_authority(&args.addr, "gRPC address", true)?;
 
     let endpoint_uri = format!("http://{}", args.addr);
     let request_scheme = if args.tls { "https" } else { "http" };
@@ -44,6 +48,7 @@ pub async fn run(
         endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
 
         if let Some(authority) = &args.authority {
+            validate_authority(authority, "gRPC authority", false)?;
             let origin = format!("{request_scheme}://{authority}")
                 .parse()
                 .map_err(|error| {
@@ -147,6 +152,34 @@ fn has_tls_flags(args: &GrpcArgs) -> bool {
         || args.tls_args.key.is_some()
         || args.tls_args.server_name.is_some()
         || args.tls_args.insecure_skip_verify
+}
+
+fn validate_authority(raw: &str, label: &str, require_port: bool) -> Result<()> {
+    let authority = raw
+        .parse::<Authority>()
+        .map_err(|error| AppError::invalid_config(format!("invalid {label} {raw:?}: {error}")))?;
+    if raw.contains('@') {
+        return Err(AppError::invalid_config(format!(
+            "invalid {label} {raw:?}: user info is not allowed"
+        )));
+    }
+
+    let port_part = authority
+        .as_str()
+        .strip_prefix(authority.host())
+        .unwrap_or_default();
+    if !port_part.is_empty() && authority.port_u16().is_none() {
+        return Err(AppError::invalid_config(format!(
+            "invalid {label} {raw:?}: port must be a valid integer"
+        )));
+    }
+    if require_port && port_part.is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "invalid {label} {raw:?}: port is required"
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Clone)]

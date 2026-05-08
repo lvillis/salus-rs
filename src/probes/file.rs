@@ -13,6 +13,25 @@ pub async fn run(
     args: &FileArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
+    let timeout = options.timeout;
+    match tokio::time::timeout(timeout, run_inner(options, args, started)).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::failure(format!(
+            "file probe timed out after {}",
+            humantime::format_duration(timeout)
+        ))),
+    }
+}
+
+async fn run_inner(
+    options: ProbeOptions,
+    args: &FileArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
+    if args.path.as_os_str().is_empty() {
+        return Err(AppError::invalid_config("--path must not be empty"));
+    }
+
     if let (Some(min_size), Some(max_size)) = (args.min_size, args.max_size)
         && min_size > max_size
     {
@@ -26,6 +45,10 @@ pub async fn run(
         return Err(AppError::invalid_config(
             "--max-read must be greater than 0 when file content assertions are used",
         ));
+    }
+
+    if args.contains.iter().any(String::is_empty) {
+        return Err(AppError::invalid_config("--contains must not be empty"));
     }
 
     let metadata = tokio::fs::metadata(&args.path)
@@ -99,7 +122,7 @@ pub async fn run(
         })?;
 
         if !args.contains.is_empty() {
-            let file_body = read_file(&mut file, &args.path, args.max_read).await?;
+            let file_body = read_file(&mut file, &args.path, args.max_read, &args.contains).await?;
             let body = String::from_utf8_lossy(&file_body.bytes);
             for needle in &args.contains {
                 if !body.contains(needle) {
@@ -139,6 +162,7 @@ async fn read_file(
     file: &mut tokio::fs::File,
     path: &std::path::Path,
     limit: usize,
+    required_texts: &[String],
 ) -> Result<BufferedFile> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
@@ -163,10 +187,15 @@ async fn read_file(
             truncated = true;
         }
 
-        if truncated {
+        if (!required_texts.is_empty() && contains_all(&bytes, required_texts)) || truncated {
             break;
         }
     }
 
     Ok(BufferedFile { bytes, truncated })
+}
+
+fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
+    let body = String::from_utf8_lossy(bytes);
+    required_texts.iter().all(|needle| body.contains(needle))
 }

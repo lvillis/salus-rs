@@ -5,7 +5,7 @@ use tokio::net::{TcpStream, lookup_host};
 use crate::{
     cli::TcpArgs,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport},
+    probe::{ProbeOptions, ProbeReport, deadline_after},
 };
 
 pub async fn run(
@@ -14,6 +14,9 @@ pub async fn run(
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
     let timeout = options.timeout;
+    if args.addr.is_empty() {
+        return Err(AppError::invalid_config("--addr must not be empty"));
+    }
 
     let result = tokio::time::timeout(timeout, async {
         let addrs = lookup_host(&args.addr)
@@ -33,7 +36,7 @@ pub async fn run(
             )));
         }
 
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = deadline_after(timeout)?;
         let mut last_error = None;
 
         for (index, addr) in addrs.iter().copied().enumerate() {

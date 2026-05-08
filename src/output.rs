@@ -34,6 +34,9 @@ fn quote_field_value(value: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                escaped.push_str(&format!("\\u{{{:04X}}}", u32::from(ch)));
+            }
             _ => escaped.push(ch),
         }
     }
@@ -47,11 +50,11 @@ mod tests {
 
     #[test]
     fn success_output_quotes_and_escapes_fields() {
-        let formatted = format_success("file", "/tmp/ready file", 7, Some("status=\"ok\""));
+        let formatted = format_success("file", "/tmp/ready\u{1b} file", 7, Some("status=\"ok\""));
 
         assert_eq!(
             formatted,
-            "result=healthy mode=file target=\"/tmp/ready file\" duration_ms=7 detail=\"status=\\\"ok\\\"\""
+            "result=healthy mode=file target=\"/tmp/ready\\u{001B} file\" duration_ms=7 detail=\"status=\\\"ok\\\"\""
         );
     }
 }

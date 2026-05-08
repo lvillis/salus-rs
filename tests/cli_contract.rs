@@ -78,7 +78,10 @@ fn help_exits_zero_and_prints_to_stdout() {
 
     assert_eq!(output.status.code(), Some(0));
     assert!(stdout.contains("Container health check probe runner"));
-    assert!(stdout.contains("--max-latency <MAX_LATENCY>"));
+    assert!(stdout.contains("--timeout <DURATION>"));
+    assert!(stdout.contains("--max-latency <DURATION>"));
+    assert!(stdout.contains("Hard deadline for one probe"));
+    assert!(stdout.contains("Fail if a successful probe takes longer than this"));
     assert!(
         stdout.contains(
             "Argument values support ${VAR} and ${VAR:-default} expansion before parsing."
@@ -121,17 +124,33 @@ fn http_help_groups_options_by_concern() {
     assert!(request < assertions);
     assert!(assertions < tls);
     assert!(tls < limits);
-    assert!(stdout.contains("--header <HEADER>"));
+    assert!(stdout.contains("--header <NAME:VALUE>"));
+    assert!(stdout.contains("Request header to send"));
+    assert!(stdout.contains("--status <CODE|RANGE>"));
+    assert!(stdout.contains("Accepted status code or inclusive range"));
     assert!(
         stdout.contains(
             "Argument values support ${VAR} and ${VAR:-default} expansion before parsing."
         )
     );
-    assert!(stdout.contains("--header-present <HEADER_PRESENT>"));
-    assert!(stdout.contains("--header-equals <HEADER_EQUALS>"));
-    assert!(stdout.contains("--contains <CONTAINS>"));
-    assert!(stdout.contains("--body-equals <BODY_EQUALS>"));
-    assert!(stdout.contains("--not-contains <NOT_CONTAINS>"));
+    assert!(stdout.contains("--header-present <NAME>"));
+    assert!(stdout.contains("--header-equals <NAME:VALUE>"));
+    assert!(stdout.contains("--contains <TEXT>"));
+    assert!(stdout.contains("--body-equals <TEXT>"));
+    assert!(stdout.contains("--not-contains <TEXT>"));
+}
+
+#[test]
+fn help_does_not_require_environment_expansion() {
+    let output = run_salus_with_env(
+        &["http", "--url", "${SALUS_TEST_MISSING_ENV}", "--help"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.contains("Probe an HTTP or HTTPS health endpoint"));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -229,6 +248,62 @@ fn environment_variable_defaults_are_supported() {
     assert!(output.stderr.is_empty());
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn environment_variable_defaults_are_used_for_empty_values() {
+    let path = temp_file_path("salus-cli-env-empty-default");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_DEFAULT_NEEDLE:-ready}",
+        ],
+        &[("SALUS_TEST_DEFAULT_NEEDLE", Some(""))],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn quiet_suppresses_environment_expansion_errors() {
+    let path = temp_file_path("salus-cli-quiet-env-error");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "--quiet",
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_MISSING_ENV}",
+        ],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn quiet_suppresses_cli_parse_errors() {
+    let output = run_salus(&["--quiet", "--bad-flag"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
@@ -363,4 +438,25 @@ fn failure_prints_message_to_stderr_by_default() {
     );
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn exec_output_limit_reports_unproven_required_text() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "ready",
+        "--max-output",
+        "4",
+        "--",
+        "sh",
+        "-c",
+        "printf aaaa; sleep 1 &",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "stdout of sh reached --max-output 4 bytes, cannot prove required text \"ready\""
+    ));
 }

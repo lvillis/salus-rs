@@ -2,8 +2,16 @@ use std::path::Path;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::{
-    HeaderMap, Method, Request, Response, body::Bytes, body::Incoming, client::conn::http1,
-    header::HOST, header::HeaderName, header::HeaderValue, header::USER_AGENT,
+    HeaderMap, Method, Request, Response,
+    body::{Body, Bytes, Incoming},
+    client::conn::http1,
+    header::CONTENT_LENGTH,
+    header::HOST,
+    header::HeaderName,
+    header::HeaderValue,
+    header::TRANSFER_ENCODING,
+    header::USER_AGENT,
+    http::uri::Authority,
 };
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::{
@@ -11,6 +19,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
 };
 use tokio::net::UnixStream;
+use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::{
@@ -57,8 +66,14 @@ pub async fn run(
             "URL user info is not supported for security reasons",
         ));
     }
+    if url.fragment().is_some() {
+        return Err(AppError::invalid_config(
+            "URL fragments are not supported in HTTP probes",
+        ));
+    }
 
     let host = default_host_header(&url, args.host.as_deref())?;
+    let request_uri = url.as_str().to_string();
     let uses_tls = url.scheme() == "https";
 
     if !uses_tls && has_tls_flags(&args.tls) {
@@ -70,7 +85,7 @@ pub async fn run(
     let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
         let client = build_http_client(&args.tls)?;
-        let request = build_request(raw_url, &host, &prepared)?;
+        let request = build_request(&request_uri, &host, &prepared)?;
         let response = client.request(request).await.map_err(|error| {
             AppError::failure(format!("HTTP request to {raw_url} failed: {error}"))
         })?;
@@ -101,7 +116,10 @@ async fn run_unix_socket(
         ));
     }
 
-    let host = args.host.as_deref().unwrap_or("localhost");
+    let host = match args.host.as_deref() {
+        Some(host) => explicit_host_header(host)?,
+        None => "localhost".to_string(),
+    };
     let target = format!("unix:{}{}", sock.display(), path);
 
     let timeout = options.timeout;
@@ -116,11 +134,11 @@ async fn run_unix_socket(
         let (mut sender, connection) = http1::handshake::<_, Empty<Bytes>>(io)
             .await
             .map_err(|error| AppError::failure(format!("HTTP handshake failed: {error}")))?;
-        tokio::spawn(async move {
+        let _connection_task = AbortOnDrop::new(tokio::spawn(async move {
             let _ = connection.await;
-        });
+        }));
 
-        let request = build_request(path, host, &prepared)?;
+        let request = build_request(path, &host, &prepared)?;
         let response = sender.send_request(request).await.map_err(|error| {
             AppError::failure(format!(
                 "HTTP request over unix socket {} failed: {error}",
@@ -140,6 +158,22 @@ async fn run_unix_socket(
     }
 }
 
+struct AbortOnDrop<T> {
+    handle: JoinHandle<T>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 fn validate_http_args(args: &HttpArgs) -> Result<()> {
     match (&args.url, &args.sock) {
         (Some(_), Some(_)) => Err(AppError::invalid_config(
@@ -152,6 +186,31 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
     }?;
 
     if args.sock.is_some() {
+        if args
+            .sock
+            .as_ref()
+            .is_some_and(|sock| sock.as_os_str().is_empty())
+        {
+            return Err(AppError::invalid_config("--sock must not be empty"));
+        }
+        if args.path.is_none() {
+            return Err(AppError::invalid_config("--path is required with --sock"));
+        }
+        if args
+            .path
+            .as_deref()
+            .is_some_and(|path| !path.starts_with('/'))
+        {
+            return Err(AppError::invalid_config(
+                "HTTP UDS --path must start with /",
+            ));
+        }
+        if args.path.as_deref().is_some_and(|path| path.contains('#')) {
+            return Err(AppError::invalid_config(
+                "HTTP UDS --path must not contain a URL fragment",
+            ));
+        }
+
         if has_tls_flags(&args.tls) {
             return Err(AppError::invalid_config(
                 "TLS flags are not supported with --sock",
@@ -169,10 +228,23 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
         ));
     }
 
-    if args.method == "HEAD" && has_body_assertions(args) {
+    validate_non_empty_assertions("--contains", &args.contains)?;
+    validate_non_empty_assertions("--not-contains", &args.not_contains)?;
+
+    if parse_method(&args.method)? == Method::HEAD && has_body_assertions(args) {
         return Err(AppError::invalid_config(
             "HTTP body assertions are not supported with HEAD requests",
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_non_empty_assertions(flag: &str, values: &[String]) -> Result<()> {
+    if values.iter().any(String::is_empty) {
+        return Err(AppError::invalid_config(format!(
+            "{flag} must not be empty"
+        )));
     }
 
     Ok(())
@@ -215,7 +287,9 @@ fn build_request(
 ) -> Result<Request<Empty<Bytes>>> {
     let mut builder = Request::builder().method(&prepared.method).uri(uri);
     builder = builder.header(HOST, host);
-    builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
+    if !prepared.headers.iter().any(|(name, _)| name == USER_AGENT) {
+        builder = builder.header(USER_AGENT, USER_AGENT_VALUE);
+    }
 
     for (name, value) in &prepared.headers {
         builder = builder.header(name, value);
@@ -259,7 +333,7 @@ async fn evaluate_response(
     let body = read_body(
         response.into_body(),
         args.max_body,
-        requires_complete_body(args),
+        early_body_contains_assertions(args),
     )
     .await?;
     assert_response_body(&body, args, target)?;
@@ -274,7 +348,8 @@ async fn evaluate_response(
 }
 
 fn parse_method(raw: &str) -> Result<Method> {
-    match raw {
+    let method = raw.trim().to_ascii_uppercase();
+    match method.as_str() {
         "GET" => Ok(Method::GET),
         "HEAD" => Ok(Method::HEAD),
         other => Err(AppError::invalid_config(format!(
@@ -292,6 +367,16 @@ fn parse_headers(raw_headers: &[String]) -> Result<Vec<(HeaderName, HeaderValue)
         let name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| {
             AppError::invalid_config(format!("invalid header name {name:?}: {error}"))
         })?;
+        if name == HOST {
+            return Err(AppError::invalid_config(
+                "--header cannot set Host; use --host instead",
+            ));
+        }
+        if name == CONTENT_LENGTH || name == TRANSFER_ENCODING {
+            return Err(AppError::invalid_config(format!(
+                "--header cannot set HTTP framing header {name}"
+            )));
+        }
         let value = HeaderValue::from_str(value.trim()).map_err(|error| {
             AppError::invalid_config(format!("invalid header value for {name}: {error}"))
         })?;
@@ -311,7 +396,11 @@ fn parse_header_names(raw_names: &[String]) -> Result<Vec<HeaderName>> {
     Ok(names)
 }
 
-fn parse_header_assertions(raw_assertions: &[String]) -> Result<Vec<HeaderAssertion>> {
+fn parse_header_assertions(
+    raw_assertions: &[String],
+    flag: &str,
+    allow_empty_value: bool,
+) -> Result<Vec<HeaderAssertion>> {
     let mut assertions = Vec::with_capacity(raw_assertions.len());
     for raw in raw_assertions {
         let (name, value) = raw.split_once(':').ok_or_else(|| {
@@ -322,9 +411,15 @@ fn parse_header_assertions(raw_assertions: &[String]) -> Result<Vec<HeaderAssert
         let name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|error| {
             AppError::invalid_config(format!("invalid header name {name:?}: {error}"))
         })?;
+        let value = value.trim();
+        if !allow_empty_value && value.is_empty() {
+            return Err(AppError::invalid_config(format!(
+                "{flag} value must not be empty"
+            )));
+        }
         assertions.push(HeaderAssertion {
             name,
-            value: value.trim().to_string(),
+            value: value.to_string(),
         });
     }
     Ok(assertions)
@@ -332,7 +427,7 @@ fn parse_header_assertions(raw_assertions: &[String]) -> Result<Vec<HeaderAssert
 
 fn default_host_header(url: &Url, override_host: Option<&str>) -> Result<String> {
     if let Some(host) = override_host {
-        return Ok(host.to_string());
+        return explicit_host_header(host);
     }
 
     let host = url
@@ -345,10 +440,47 @@ fn default_host_header(url: &Url, override_host: Option<&str>) -> Result<String>
         _ => None,
     };
 
-    Ok(match port {
+    let header = match port {
         Some(port) if Some(port) != default => format!("{host}:{port}"),
         _ => host.to_string(),
-    })
+    };
+    validate_host_header(&header)?;
+    Ok(header)
+}
+
+fn explicit_host_header(raw: &str) -> Result<String> {
+    let host = raw.trim();
+    if host.is_empty() {
+        return Err(AppError::invalid_config("--host must not be empty"));
+    }
+
+    validate_host_header(host)?;
+    Ok(host.to_string())
+}
+
+fn validate_host_header(host: &str) -> Result<()> {
+    if host.contains('@') {
+        return Err(AppError::invalid_config(format!(
+            "invalid Host header {host:?}: user info is not allowed"
+        )));
+    }
+
+    let authority = host.parse::<Authority>().map_err(|error| {
+        AppError::invalid_config(format!("invalid Host header {host:?}: {error}"))
+    })?;
+    let port_part = authority
+        .as_str()
+        .strip_prefix(authority.host())
+        .unwrap_or_default();
+    if !port_part.is_empty() && authority.port_u16().is_none() {
+        return Err(AppError::invalid_config(format!(
+            "invalid Host header {host:?}: port must be a valid integer"
+        )));
+    }
+
+    HeaderValue::from_str(host)
+        .map(|_| ())
+        .map_err(|error| AppError::invalid_config(format!("invalid Host header {host:?}: {error}")))
 }
 
 fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
@@ -362,8 +494,8 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
     let mut ranges = Vec::with_capacity(raw_ranges.len());
     for raw in raw_ranges {
         let range = if let Some((start, end)) = raw.split_once('-') {
-            let start = parse_status_code(start)?;
-            let end = parse_status_code(end)?;
+            let start = parse_status_code(start.trim())?;
+            let end = parse_status_code(end.trim())?;
             if start > end {
                 return Err(AppError::invalid_config(format!(
                     "invalid status range {raw}, start is greater than end"
@@ -371,7 +503,7 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
             }
             StatusRange { start, end }
         } else {
-            let code = parse_status_code(raw)?;
+            let code = parse_status_code(raw.trim())?;
             StatusRange {
                 start: code,
                 end: code,
@@ -439,9 +571,17 @@ impl PreparedHttpArgs {
             headers: parse_headers(&args.header)?,
             header_assertions: HeaderAssertions {
                 present: parse_header_names(&args.header_present)?,
-                equals: parse_header_assertions(&args.header_equals)?,
-                contains: parse_header_assertions(&args.header_contains)?,
-                not_contains: parse_header_assertions(&args.header_not_contains)?,
+                equals: parse_header_assertions(&args.header_equals, "--header-equals", true)?,
+                contains: parse_header_assertions(
+                    &args.header_contains,
+                    "--header-contains",
+                    false,
+                )?,
+                not_contains: parse_header_assertions(
+                    &args.header_not_contains,
+                    "--header-not-contains",
+                    false,
+                )?,
             },
             status_ranges: parse_status_ranges(&args.status)?,
         })
@@ -513,8 +653,12 @@ fn has_body_assertions(args: &HttpArgs) -> bool {
     args.body_equals.is_some() || !args.contains.is_empty() || !args.not_contains.is_empty()
 }
 
-fn requires_complete_body(args: &HttpArgs) -> bool {
-    args.body_equals.is_some() || !args.not_contains.is_empty()
+fn early_body_contains_assertions(args: &HttpArgs) -> &[String] {
+    if args.body_equals.is_none() && args.not_contains.is_empty() {
+        &args.contains
+    } else {
+        &[]
+    }
 }
 
 fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> Result<()> {
@@ -571,10 +715,13 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
 async fn read_body(
     mut body: hyper::body::Incoming,
     limit: usize,
-    stop_on_limit: bool,
+    early_contains: &[String],
 ) -> Result<BufferedBody> {
     let mut bytes = Vec::new();
     let mut truncated = false;
+    let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
+    let body_size_upper = body.size_hint().upper();
+    let declared_body_exceeds_limit = body_size_upper.is_some_and(|upper| upper > limit_u64);
 
     while let Some(frame) = body.frame().await {
         let frame = frame
@@ -591,11 +738,37 @@ async fn read_body(
                 truncated = true;
             }
 
-            if truncated && stop_on_limit {
+            if !early_contains.is_empty() && contains_all(&bytes, early_contains) {
+                break;
+            }
+
+            if truncated
+                || (declared_body_exceeds_limit && bytes.len() == limit)
+                || (!early_contains.is_empty() && bytes.len() == limit)
+            {
+                truncated = true;
                 break;
             }
         }
     }
 
     Ok(BufferedBody { bytes, truncated })
+}
+
+fn contains_all(bytes: &[u8], needles: &[String]) -> bool {
+    let body_text = String::from_utf8_lossy(bytes);
+    needles.iter().all(|needle| body_text.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_host_header;
+    use url::Url;
+
+    #[test]
+    fn default_host_header_preserves_ipv6_brackets() {
+        let url = Url::parse("http://[::1]:8080/healthz").unwrap();
+
+        assert_eq!(default_host_header(&url, None).unwrap(), "[::1]:8080");
+    }
 }

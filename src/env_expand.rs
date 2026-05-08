@@ -112,14 +112,13 @@ where
 
     validate_env_name(name)?;
 
-    match lookup(name)? {
-        Some(value) => Ok(value),
-        None => match default {
-            Some(default) => Ok(default.to_string()),
-            None => Err(AppError::invalid_config(format!(
-                "environment variable {name} is not set"
-            ))),
-        },
+    match (lookup(name)?, default) {
+        (Some(value), Some(default)) if value.is_empty() => Ok(default.to_string()),
+        (Some(value), _) => Ok(value),
+        (None, Some(default)) => Ok(default.to_string()),
+        (None, None) => Err(AppError::invalid_config(format!(
+            "environment variable {name} is not set"
+        ))),
     }
 }
 
@@ -179,6 +178,20 @@ mod tests {
         let expanded = expand_with("${MODE:-ready}", &[]).unwrap();
 
         assert_eq!(expanded, "ready");
+    }
+
+    #[test]
+    fn expands_default_when_variable_is_empty() {
+        let expanded = expand_with("${MODE:-ready}", &[("MODE", "")]).unwrap();
+
+        assert_eq!(expanded, "ready");
+    }
+
+    #[test]
+    fn expands_empty_required_variable_without_default() {
+        let expanded = expand_with("${MODE}", &[("MODE", "")]).unwrap();
+
+        assert_eq!(expanded, "");
     }
 
     #[test]

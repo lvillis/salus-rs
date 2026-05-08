@@ -85,3 +85,28 @@ impl ProbeReport {
         0
     }
 }
+
+pub fn deadline_after(timeout: Duration) -> Result<tokio::time::Instant> {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| {
+            AppError::invalid_config(format!(
+                "--timeout is too large: {}",
+                humantime::format_duration(timeout)
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::deadline_after;
+
+    #[test]
+    fn deadline_after_rejects_overflowing_timeout() {
+        let error = deadline_after(Duration::MAX).unwrap_err();
+
+        assert!(error.to_string().contains("--timeout is too large"));
+    }
+}
