@@ -4,6 +4,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     cli::FileArgs,
+    diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport},
 };
@@ -31,6 +32,7 @@ async fn run_inner(
     if args.path.as_os_str().is_empty() {
         return Err(AppError::invalid_config("--path must not be empty"));
     }
+    let path_label = diagnostic::path(&args.path);
 
     if let (Some(min_size), Some(max_size)) = (args.min_size, args.max_size)
         && min_size > max_size
@@ -55,18 +57,14 @@ async fn run_inner(
         .await
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
-                AppError::failure(format!("file {} does not exist", args.path.display()))
+                AppError::failure(format!("file {path_label} does not exist"))
             }
-            _ => AppError::failure(format!(
-                "failed to read metadata for {}: {error}",
-                args.path.display()
-            )),
+            _ => AppError::failure(format!("failed to read metadata for {path_label}: {error}")),
         })?;
 
     if !metadata.is_file() {
         return Err(AppError::failure(format!(
-            "{} is not a regular file",
-            args.path.display()
+            "{path_label} is not a regular file"
         )));
     }
 
@@ -74,9 +72,7 @@ async fn run_inner(
         && metadata.len() < min_size
     {
         return Err(AppError::failure(format!(
-            "file {} is smaller than {} bytes",
-            args.path.display(),
-            min_size
+            "file {path_label} is smaller than {min_size} bytes"
         )));
     }
 
@@ -84,42 +80,37 @@ async fn run_inner(
         && metadata.len() > max_size
     {
         return Err(AppError::failure(format!(
-            "file {} is larger than {} bytes",
-            args.path.display(),
-            max_size
+            "file {path_label} is larger than {max_size} bytes"
         )));
     }
 
     if args.non_empty && metadata.len() == 0 {
-        return Err(AppError::failure(format!(
-            "file {} is empty",
-            args.path.display()
-        )));
+        return Err(AppError::failure(format!("file {path_label} is empty")));
     }
 
     if let Some(max_age) = args.max_age {
         let modified = metadata.modified().map_err(|error| {
             AppError::failure(format!(
-                "failed to read modification time for {}: {error}",
-                args.path.display()
+                "failed to read modification time for {path_label}: {error}"
             ))
         })?;
-        let age = SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or_default();
+        let age = SystemTime::now().duration_since(modified).map_err(|_| {
+            AppError::failure(format!(
+                "file {path_label} has a modification time in the future"
+            ))
+        })?;
         if age > max_age {
             return Err(AppError::failure(format!(
-                "file {} is older than {}",
-                args.path.display(),
+                "file {path_label} is older than {}",
                 humantime::format_duration(max_age)
             )));
         }
     }
 
     if args.readable || !args.contains.is_empty() {
-        let mut file = tokio::fs::File::open(&args.path).await.map_err(|error| {
-            AppError::failure(format!("failed to open {}: {error}", args.path.display()))
-        })?;
+        let mut file = tokio::fs::File::open(&args.path)
+            .await
+            .map_err(|error| AppError::failure(format!("failed to open {path_label}: {error}")))?;
 
         if !args.contains.is_empty() {
             let file_body = read_file(&mut file, &args.path, args.max_read, &args.contains).await?;
@@ -128,15 +119,11 @@ async fn run_inner(
                     if file_body.truncated {
                         return Err(AppError::failure(format!(
                             "file {} was truncated at {} bytes, cannot prove required text {:?}",
-                            args.path.display(),
-                            args.max_read,
-                            needle
+                            path_label, args.max_read, needle
                         )));
                     }
                     return Err(AppError::failure(format!(
-                        "file {} does not contain required text {:?}",
-                        args.path.display(),
-                        needle
+                        "file {path_label} does not contain required text {needle:?}"
                     )));
                 }
             }
@@ -169,7 +156,10 @@ async fn read_file(
 
     loop {
         let read = file.read(&mut buffer).await.map_err(|error| {
-            AppError::failure(format!("failed to read {}: {error}", path.display()))
+            AppError::failure(format!(
+                "failed to read {}: {error}",
+                diagnostic::path(path)
+            ))
         })?;
         if read == 0 {
             break;

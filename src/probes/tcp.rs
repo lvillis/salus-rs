@@ -1,10 +1,11 @@
 use std::time::Duration;
 
-use hyper::http::uri::Authority;
 use tokio::net::{TcpStream, lookup_host};
 
 use crate::{
+    authority::{PortPolicy, RawFormat, validate_authority},
     cli::TcpArgs,
+    diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport, deadline_after},
 };
@@ -24,17 +25,21 @@ pub async fn run(
         let addrs = lookup_host(&args.addr)
             .await
             .map_err(|error| match error.kind() {
-                std::io::ErrorKind::InvalidInput => {
-                    AppError::invalid_config(format!("invalid TCP address {}: {error}", args.addr))
-                }
-                _ => AppError::failure(format!("failed to resolve {}: {error}", args.addr)),
+                std::io::ErrorKind::InvalidInput => AppError::invalid_config(format!(
+                    "invalid TCP address {}: {error}",
+                    diagnostic::value(&args.addr)
+                )),
+                _ => AppError::failure(format!(
+                    "failed to resolve {}: {error}",
+                    diagnostic::value(&args.addr)
+                )),
             })?
             .collect::<Vec<_>>();
 
         if addrs.is_empty() {
             return Err(AppError::failure(format!(
                 "no TCP addresses resolved for {}",
-                args.addr
+                diagnostic::value(&args.addr)
             )));
         }
 
@@ -70,8 +75,11 @@ pub async fn run(
         }
 
         Err(AppError::failure(match last_error {
-            Some(error) => format!("failed to connect to {}: {error}", args.addr),
-            None => format!("timed out connecting to {}", args.addr),
+            Some(error) => format!(
+                "failed to connect to {}: {error}",
+                diagnostic::value(&args.addr)
+            ),
+            None => format!("timed out connecting to {}", diagnostic::value(&args.addr)),
         }))
     })
     .await;
@@ -86,40 +94,7 @@ pub async fn run(
 }
 
 fn validate_tcp_addr(raw: &str) -> Result<()> {
-    let authority = raw
-        .parse::<Authority>()
-        .map_err(|error| AppError::invalid_config(format!("invalid TCP address {raw}: {error}")))?;
-    if raw.contains('@') {
-        return Err(AppError::invalid_config(format!(
-            "invalid TCP address {raw}: user info is not allowed"
-        )));
-    }
-    if authority.host().is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "invalid TCP address {raw}: host must not be empty"
-        )));
-    }
-
-    let port_part = authority
-        .as_str()
-        .strip_prefix(authority.host())
-        .unwrap_or_default();
-    if port_part.is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "invalid TCP address {raw}: port is required"
-        )));
-    }
-    let Some(port) = authority.port_u16() else {
-        return Err(AppError::invalid_config(format!(
-            "invalid TCP address {raw}: port must be a valid integer"
-        )));
-    };
-    if port == 0 {
-        return Err(AppError::invalid_config(format!(
-            "invalid TCP address {raw}: port must be between 1 and 65535"
-        )));
-    }
-
+    validate_authority(raw, "TCP address", PortPolicy::Required, RawFormat::Display)?;
     Ok(())
 }
 

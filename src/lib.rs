@@ -11,7 +11,9 @@
     )
 )]
 
+mod authority;
 mod cli;
+mod diagnostic;
 mod env_expand;
 mod error;
 mod output;
@@ -33,15 +35,16 @@ where
     T: Into<OsString>,
 {
     let raw_args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-    let quiet_requested = requests_quiet(&raw_args);
+    let raw_quiet_requested = requests_quiet(&raw_args);
     let args = if let Some(args) = help_or_version_args(&raw_args) {
         args
     } else {
         match env_expand::expand_argv(raw_args) {
             Ok(args) => args,
-            Err(error) => return error.print_and_exit_code_with_quiet(quiet_requested),
+            Err(error) => return error.print_and_exit_code_with_quiet(raw_quiet_requested),
         }
     };
+    let quiet_requested = raw_quiet_requested || requests_quiet(&args);
 
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
@@ -98,10 +101,7 @@ fn help_or_version_args(args: &[OsString]) -> Option<Vec<OsString>> {
             return None;
         }
 
-        let Some(arg) = arg.to_str() else {
-            index += 1;
-            continue;
-        };
+        let arg = arg.to_str()?;
 
         if option_takes_value(arg, command) {
             index += usize::from(!arg.contains('=')) + 1;
@@ -146,8 +146,7 @@ fn requests_quiet(args: &[OsString]) -> bool {
         }
 
         let Some(arg) = arg.to_str() else {
-            index += 1;
-            continue;
+            return false;
         };
 
         if option_takes_value(arg, command) {

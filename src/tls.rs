@@ -10,6 +10,7 @@ use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::{
     cli::TlsArgs,
+    diagnostic,
     error::{AppError, Result},
 };
 
@@ -72,7 +73,7 @@ fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
         let file = File::open(path).map_err(|error| {
             AppError::invalid_config(format!(
                 "failed to open CA file {}: {error}",
-                path.display()
+                diagnostic::path(path)
             ))
         })?;
         let mut reader = BufReader::new(file);
@@ -81,14 +82,14 @@ fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
             .map_err(|error| {
                 AppError::invalid_config(format!(
                     "failed to parse CA file {}: {error}",
-                    path.display()
+                    diagnostic::path(path)
                 ))
             })?;
 
         if certs.is_empty() {
             return Err(AppError::invalid_config(format!(
                 "CA file {} does not contain any certificates",
-                path.display()
+                diagnostic::path(path)
             )));
         }
 
@@ -96,7 +97,7 @@ fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
             roots.add(cert).map_err(|error| {
                 AppError::invalid_config(format!(
                     "invalid CA certificate in {}: {error}",
-                    path.display()
+                    diagnostic::path(path)
                 ))
             })?;
         }
@@ -117,7 +118,7 @@ fn load_client_identity(
             let cert_file = File::open(cert_path).map_err(|error| {
                 AppError::invalid_config(format!(
                     "failed to open client certificate {}: {error}",
-                    cert_path.display()
+                    diagnostic::path(cert_path)
                 ))
             })?;
             let mut cert_reader = BufReader::new(cert_file);
@@ -126,35 +127,35 @@ fn load_client_identity(
                 .map_err(|error| {
                     AppError::invalid_config(format!(
                         "failed to parse client certificate {}: {error}",
-                        cert_path.display()
+                        diagnostic::path(cert_path)
                     ))
                 })?;
 
             if certs.is_empty() {
                 return Err(AppError::invalid_config(format!(
                     "client certificate {} does not contain any certificates",
-                    cert_path.display()
+                    diagnostic::path(cert_path)
                 )));
             }
 
             let key_file = File::open(key_path).map_err(|error| {
                 AppError::invalid_config(format!(
                     "failed to open client key {}: {error}",
-                    key_path.display()
+                    diagnostic::path(key_path)
                 ))
             })?;
             let mut key_reader = BufReader::new(key_file);
             let key = rustls_pemfile::private_key(&mut key_reader).map_err(|error| {
                 AppError::invalid_config(format!(
                     "failed to parse client key {}: {error}",
-                    key_path.display()
+                    diagnostic::path(key_path)
                 ))
             })?;
 
             let key = key.ok_or_else(|| {
                 AppError::invalid_config(format!(
                     "client key {} does not contain a supported private key",
-                    key_path.display()
+                    diagnostic::path(key_path)
                 ))
             })?;
 

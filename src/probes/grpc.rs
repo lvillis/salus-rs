@@ -5,10 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use hyper::http::{
-    Uri,
-    uri::{Authority, Scheme},
-};
+use hyper::http::{Uri, uri::Scheme};
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use tonic::transport::Endpoint;
 use tonic_health::pb::{
@@ -17,7 +14,9 @@ use tonic_health::pb::{
 use tower_service::Service;
 
 use crate::{
+    authority::{PortPolicy, RawFormat, validate_authority},
     cli::GrpcArgs,
+    diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport},
     tls::{build_http_tls_config, parse_server_name_override},
@@ -31,7 +30,12 @@ pub async fn run(
     if !args.tls && has_tls_flags(args) {
         return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
     }
-    validate_authority(&args.addr, "gRPC address", true)?;
+    validate_authority(
+        &args.addr,
+        "gRPC address",
+        PortPolicy::Required,
+        RawFormat::Debug,
+    )?;
 
     let endpoint_uri = format!("http://{}", args.addr);
     let request_scheme = if args.tls { "https" } else { "http" };
@@ -48,7 +52,12 @@ pub async fn run(
         endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
 
         if let Some(authority) = &args.authority {
-            validate_authority(authority, "gRPC authority", false)?;
+            validate_authority(
+                authority,
+                "gRPC authority",
+                PortPolicy::Optional,
+                RawFormat::Debug,
+            )?;
             let origin = format!("{request_scheme}://{authority}")
                 .parse()
                 .map_err(|error| {
@@ -102,14 +111,7 @@ pub async fn run(
                 service: args.service.clone().unwrap_or_default(),
             })
             .await
-            .map_err(|status| {
-                AppError::failure(format!(
-                    "gRPC health check for {} failed: code={} message={}",
-                    args.addr,
-                    status.code(),
-                    status.message()
-                ))
-            })?;
+            .map_err(|status| grpc_status_error(&args.addr, &status))?;
 
         let status = ServingStatus::try_from(response.get_ref().status).map_err(|_| {
             AppError::failure(format!(
@@ -144,6 +146,15 @@ pub async fn run(
     }
 }
 
+fn grpc_status_error(addr: &str, status: &tonic::Status) -> AppError {
+    AppError::failure(format!(
+        "gRPC health check for {} failed: code={} message={}",
+        diagnostic::value(addr),
+        status.code(),
+        diagnostic::value(status.message())
+    ))
+}
+
 type ConnectorFuture<T> = Pin<Box<dyn Future<Output = std::result::Result<T, io::Error>> + Send>>;
 
 fn has_tls_flags(args: &GrpcArgs) -> bool {
@@ -152,44 +163,6 @@ fn has_tls_flags(args: &GrpcArgs) -> bool {
         || args.tls_args.key.is_some()
         || args.tls_args.server_name.is_some()
         || args.tls_args.insecure_skip_verify
-}
-
-fn validate_authority(raw: &str, label: &str, require_port: bool) -> Result<()> {
-    let authority = raw
-        .parse::<Authority>()
-        .map_err(|error| AppError::invalid_config(format!("invalid {label} {raw:?}: {error}")))?;
-    if raw.contains('@') {
-        return Err(AppError::invalid_config(format!(
-            "invalid {label} {raw:?}: user info is not allowed"
-        )));
-    }
-    if authority.host().is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "invalid {label} {raw:?}: host must not be empty"
-        )));
-    }
-
-    let port_part = authority
-        .as_str()
-        .strip_prefix(authority.host())
-        .unwrap_or_default();
-    if !port_part.is_empty() && authority.port_u16().is_none() {
-        return Err(AppError::invalid_config(format!(
-            "invalid {label} {raw:?}: port must be a valid integer"
-        )));
-    }
-    if require_port && port_part.is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "invalid {label} {raw:?}: port is required"
-        )));
-    }
-    if require_port && authority.port_u16() == Some(0) {
-        return Err(AppError::invalid_config(format!(
-            "invalid {label} {raw:?}: port must be between 1 and 65535"
-        )));
-    }
-
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -232,5 +205,21 @@ where
         };
         let future = self.inner.call(uri);
         Box::pin(async move { future.await.map_err(io::Error::other) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::grpc_status_error;
+
+    #[test]
+    fn grpc_status_error_escapes_server_message_controls() {
+        let status = tonic::Status::new(Code::Unavailable, "not ready\nnext");
+
+        let error = grpc_status_error("127.0.0.1:50051", &status);
+
+        assert!(error.to_string().contains(r#"message="not ready\nnext""#));
     }
 }

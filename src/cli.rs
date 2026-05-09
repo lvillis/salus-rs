@@ -2,7 +2,10 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
-use crate::error::{AppError, Result};
+use crate::{
+    diagnostic,
+    error::{AppError, Result},
+};
 
 const ENV_EXPANSION_AFTER_HELP: &str = "\
 Argument values support ${VAR} and ${VAR:-default} expansion before parsing.
@@ -342,6 +345,7 @@ pub struct TlsArgs {
 }
 
 pub fn parse_duration(raw: &str) -> Result<Duration> {
-    humantime::parse_duration(raw.trim())
-        .map_err(|_| AppError::invalid_config(format!("invalid duration: {raw}")))
+    humantime::parse_duration(raw.trim()).map_err(|_| {
+        AppError::invalid_config(format!("invalid duration: {}", diagnostic::value(raw)))
+    })
 }

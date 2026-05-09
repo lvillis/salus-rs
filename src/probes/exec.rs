@@ -1,4 +1,4 @@
-use std::{ffi::OsString, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 
 #[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -11,9 +11,13 @@ use tokio::{
 
 use crate::{
     cli::ExecArgs,
+    diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport, deadline_after},
 };
+
+const OUTPUT_EOF_GRACE_AFTER_LIMIT: Duration = Duration::from_millis(50);
+const OUTPUT_IDLE_GRACE_AFTER_EXIT: Duration = Duration::from_millis(50);
 
 pub async fn run(
     options: ProbeOptions,
@@ -53,7 +57,7 @@ pub async fn run(
         return Err(AppError::invalid_config("command must not be empty"));
     }
 
-    let command_label = os_string_lossy(program);
+    let command_label = diagnostic::os_str(program);
     let capture_stdout = !args.stdout_contains.is_empty();
     let capture_stderr = !args.stderr_contains.is_empty();
 
@@ -83,6 +87,7 @@ pub async fn run(
         _ => AppError::internal(format!("failed to spawn {:?}: {error}", program)),
     })?;
     let process_group = child_process_group(&child);
+    let mut process_group_cleanup = ProcessGroupCleanup::new(process_group);
 
     let mut stdout_task = if capture_stdout {
         let stdout = child
@@ -130,7 +135,7 @@ pub async fn run(
             return Err(command_timeout_error(&command_label, options.timeout));
         }
     };
-    let _process_group_cleanup = ProcessGroupCleanup::new(process_group);
+    process_group_cleanup.terminate();
 
     let code = match status.code() {
         Some(code) => code,
@@ -149,29 +154,14 @@ pub async fn run(
         )));
     }
 
-    let stdout = match await_output_task(
-        &mut stdout_task,
-        "stdout",
-        deadline,
-        options.timeout,
-        &command_label,
-    )
-    .await
-    {
+    let stdout = match await_output_task(&mut stdout_task, "stdout", deadline).await {
         Ok(bytes) => bytes,
         Err(error) => {
             abort_output_task(&stderr_task);
             return Err(error);
         }
     };
-    let stderr = await_output_task(
-        &mut stderr_task,
-        "stderr",
-        deadline,
-        options.timeout,
-        &command_label,
-    )
-    .await?;
+    let stderr = await_output_task(&mut stderr_task, "stderr", deadline).await?;
 
     for needle in &args.stdout_contains {
         if !contains_bytes(&stdout.bytes, needle) {
@@ -246,8 +236,6 @@ async fn await_output_task(
     capture: &mut Option<OutputCapture>,
     stream_name: &'static str,
     deadline: tokio::time::Instant,
-    timeout: Duration,
-    command_label: &str,
 ) -> Result<BufferedOutput> {
     let Some(capture) = capture else {
         return Ok(BufferedOutput::default());
@@ -271,34 +259,70 @@ async fn await_output_task(
             return Ok(snapshot);
         }
         if capture.snapshot.borrow().limit_reached {
-            let snapshot = capture.snapshot.borrow().clone();
-            capture.task.abort();
-            return Ok(snapshot);
+            match wait_for_output_eof_after_limit(capture, deadline).await? {
+                LimitWait::Finished(output) => return Ok(output),
+                LimitWait::StillOpen(snapshot) => return Ok(snapshot),
+                LimitWait::Changed => continue,
+            }
         }
 
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            capture.task.abort();
-            return Err(command_timeout_error(command_label, timeout));
+        match wait_for_output_idle_after_exit(capture, deadline).await? {
+            LimitWait::Finished(output) => return Ok(output),
+            LimitWait::StillOpen(snapshot) => return Ok(snapshot),
+            LimitWait::Changed => continue,
         }
+    }
+}
 
-        let timeout_sleep = tokio::time::sleep(remaining);
-        tokio::pin!(timeout_sleep);
+enum LimitWait {
+    Finished(BufferedOutput),
+    StillOpen(BufferedOutput),
+    Changed,
+}
 
-        tokio::select! {
-            join_result = &mut capture.task => {
-                return join_result
-                    .map_err(|error| AppError::internal(format!("{stream_name} task failed: {error}")))?;
-            }
-            changed = capture.snapshot.changed() => {
-                if changed.is_err() {
-                    continue;
-                }
-            }
-            () = &mut timeout_sleep => {
-                capture.task.abort();
-                return Err(command_timeout_error(command_label, timeout));
-            }
+async fn wait_for_output_idle_after_exit(
+    capture: &mut OutputCapture,
+    deadline: tokio::time::Instant,
+) -> Result<LimitWait> {
+    wait_for_output_settle(capture, deadline, OUTPUT_IDLE_GRACE_AFTER_EXIT).await
+}
+
+async fn wait_for_output_eof_after_limit(
+    capture: &mut OutputCapture,
+    deadline: tokio::time::Instant,
+) -> Result<LimitWait> {
+    wait_for_output_settle(capture, deadline, OUTPUT_EOF_GRACE_AFTER_LIMIT).await
+}
+
+async fn wait_for_output_settle(
+    capture: &mut OutputCapture,
+    deadline: tokio::time::Instant,
+    max_grace: Duration,
+) -> Result<LimitWait> {
+    let snapshot = capture.snapshot.borrow().clone();
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let grace = remaining.min(max_grace);
+    if grace.is_zero() {
+        capture.task.abort();
+        return Ok(LimitWait::StillOpen(snapshot));
+    }
+
+    let grace_sleep = tokio::time::sleep(grace);
+    tokio::pin!(grace_sleep);
+
+    tokio::select! {
+        join_result = &mut capture.task => {
+            let output = join_result
+                .map_err(|error| AppError::internal(format!("output task failed: {error}")))??;
+            Ok(LimitWait::Finished(output))
+        }
+        changed = capture.snapshot.changed() => {
+            let _ = changed;
+            Ok(LimitWait::Changed)
+        }
+        () = &mut grace_sleep => {
+            capture.task.abort();
+            Ok(LimitWait::StillOpen(snapshot))
         }
     }
 }
@@ -384,12 +408,19 @@ impl ProcessGroupCleanup {
     fn new(process_group: Option<Pid>) -> Self {
         Self { process_group }
     }
+
+    fn terminate(&mut self) {
+        let Some(process_group) = self.process_group.take() else {
+            return;
+        };
+        terminate_process_group(Some(process_group));
+    }
 }
 
 #[cfg(unix)]
 impl Drop for ProcessGroupCleanup {
     fn drop(&mut self) {
-        terminate_process_group(self.process_group.take());
+        self.terminate();
     }
 }
 
@@ -401,6 +432,8 @@ impl ProcessGroupCleanup {
     fn new(_process_group: Option<()>) -> Self {
         Self
     }
+
+    fn terminate(&mut self) {}
 }
 
 fn spawn_output_capture<R>(reader: R, limit: usize, required_texts: Vec<String>) -> OutputCapture
@@ -503,10 +536,6 @@ fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
 fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
     let needle = needle.as_bytes();
     needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
-}
-
-fn os_string_lossy(value: &OsString) -> String {
-    value.to_string_lossy().into_owned()
 }
 
 #[cfg(unix)]

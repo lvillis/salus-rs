@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::output::print_stderr_line;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("{0}")]
@@ -35,7 +37,7 @@ impl AppError {
 
     pub fn print_and_exit_code_with_quiet(&self, quiet: bool) -> i32 {
         if !quiet {
-            eprintln!("{self}");
+            print_stderr_line(self);
         }
         self.exit_code()
     }

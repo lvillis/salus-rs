@@ -1,11 +1,23 @@
+use std::io::{self, Write};
+
 use clap::Error;
 
 pub fn print_clap_error(error: Error, to_stdout: bool) {
     if to_stdout {
-        print!("{error}");
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "{error}");
+        let _ = stdout.flush();
     } else {
-        eprint!("{error}");
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "{error}");
+        let _ = stderr.flush();
     }
+}
+
+pub fn print_stderr_line(message: impl std::fmt::Display) {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+    let _ = stderr.flush();
 }
 
 pub fn format_success(mode: &str, target: &str, duration_ms: u128, detail: Option<&str>) -> String {

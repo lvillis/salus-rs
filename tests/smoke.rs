@@ -69,8 +69,29 @@ async fn tcp_probe_rejects_address_without_hostname() {
 }
 
 #[tokio::test]
+async fn tcp_probe_rejects_empty_bracketed_host() {
+    let code = salus::main_entry(args(&["salus", "tcp", "--addr", "[]:80"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn tcp_probe_rejects_embedded_bracket_host() {
+    let code = salus::main_entry(args(&["salus", "tcp", "--addr", "example[::1]:80"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn tcp_probe_rejects_zero_port() {
     let code = salus::main_entry(args(&["salus", "tcp", "--addr", "127.0.0.1:0"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn tcp_probe_rejects_out_of_range_port() {
+    let code = salus::main_entry(args(&["salus", "tcp", "--addr", "127.0.0.1:65536"])).await;
 
     assert_eq!(code, 3);
 }
@@ -350,6 +371,51 @@ async fn http_probe_rejects_host_override_without_hostname() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_empty_bracketed_host_override() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "[]:80",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_bracketed_host_override_with_suffix() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "[::1]example:80",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_embedded_bracket_host_override() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "example[::1]:80",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_rejects_invalid_host_override() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -395,6 +461,21 @@ async fn http_probe_rejects_zero_host_override_port() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_out_of_range_host_override_port() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "example.com:65536",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_rejects_invalid_ipv6_host_override_port() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -423,6 +504,124 @@ async fn http_probe_rejects_url_fragment() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_url_with_whitespace() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        " http://127.0.0.1:9/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_embedded_newline() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/health\nz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_control_character() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/health\u{1}z",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_backslash() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9\\healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_invalid_percent_encoding() {
+    let code = salus::main_entry(args(&["salus", "http", "--url", "http://127.0.0.1:9/%zz"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_empty_authority() {
+    let code = salus::main_entry(args(&["salus", "http", "--url", "http:///healthz"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_empty_userinfo() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://@127.0.0.1:9/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_empty_user_and_password() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://:@127.0.0.1:9/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_without_authority_delimiter() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http:127.0.0.1:9/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_url_with_single_slash_authority_delimiter() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http:/127.0.0.1:9/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_rejects_zero_port() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -431,6 +630,26 @@ async fn http_probe_rejects_zero_port() {
         "http://127.0.0.1:0/healthz",
     ]))
     .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_empty_url_port() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:/healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_empty_ipv6_url_port() {
+    let code = salus::main_entry(args(&["salus", "http", "--url", "http://[::1]:/healthz"])).await;
 
     assert_eq!(code, 3);
 }
@@ -659,6 +878,38 @@ async fn http_probe_rejects_invalid_unix_socket_uri_path_before_connecting() {
     assert_eq!(code, 3);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn http_probe_rejects_unix_socket_path_with_backslash_before_connecting() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--sock",
+        "/tmp/salus-missing-backslash-path.sock",
+        "--path",
+        "/health\\z",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn http_probe_rejects_unix_socket_path_with_invalid_percent_encoding_before_connecting() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--sock",
+        "/tmp/salus-missing-percent-path.sock",
+        "--path",
+        "/%zz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
 #[tokio::test]
 async fn https_probe_succeeds_with_ca_file_and_server_name_override() {
     let addr = spawn_https_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
@@ -798,6 +1049,30 @@ async fn http_probe_uses_declared_body_length_to_fail_at_max_body() {
             "4",
             "--not-contains",
             "zzz",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[tokio::test]
+async fn http_probe_unknown_length_body_at_max_body_does_not_wait_for_open_stream() {
+    let addr = spawn_http_open_body_server("HTTP/1.1 200 OK\r\n\r\naaaa").await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "http",
+            "--url",
+            &format!("http://{addr}/healthz"),
+            "--max-body",
+            "4",
+            "--contains",
+            "ready",
         ])),
     )
     .await;
@@ -1057,6 +1332,29 @@ async fn file_probe_fails_when_required_text_may_be_beyond_read_limit() {
 }
 
 #[tokio::test]
+async fn file_probe_fails_when_modified_time_is_in_the_future() {
+    let path = temp_file_path("salus-file-future-mtime");
+    fs::write(&path, b"ready\n").unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(60)))
+        .unwrap();
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "file",
+        "--path",
+        &path.display().to_string(),
+        "--max-age",
+        "5s",
+    ]))
+    .await;
+
+    assert_eq!(code, 1);
+
+    let _ = fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn file_probe_does_not_match_replacement_character_for_invalid_bytes() {
     let path = temp_file_path("salus-file-invalid-utf8");
     fs::write(&path, b"\xff").unwrap();
@@ -1221,6 +1519,51 @@ async fn exec_probe_full_output_limit_does_not_wait_for_inherited_pipe() {
 }
 
 #[tokio::test]
+async fn exec_probe_missing_required_output_does_not_wait_for_inherited_pipe() {
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "exec",
+            "--stdout-contains",
+            "ready",
+            "--",
+            "sh",
+            "-c",
+            "printf no; sleep 1 &",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_probe_missing_required_output_does_not_wait_for_daemonized_pipe() {
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "exec",
+            "--stdout-contains",
+            "ready",
+            "--",
+            "sh",
+            "-c",
+            "printf no; setsid sh -c 'sleep 1' &",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[tokio::test]
 async fn exec_probe_timeout_does_not_wait_for_inherited_output_pipes() {
     let result = tokio::time::timeout(
         Duration::from_millis(750),
@@ -1289,6 +1632,32 @@ async fn exec_probe_success_kills_background_process_group_members() {
     tokio::time::sleep(Duration::from_millis(700)).await;
 
     assert_eq!(code, 0);
+    assert!(!marker.exists());
+
+    let _ = fs::remove_file(marker);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_probe_failure_kills_background_process_group_members() {
+    let marker = temp_file_path("salus-exec-failure-background");
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "--timeout",
+        "2s",
+        "exec",
+        "--",
+        "sh",
+        "-c",
+        "marker=$1; (sleep 0.4; printf survived > \"$marker\") & exit 42",
+        "sh",
+        &marker.display().to_string(),
+    ]))
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    assert_eq!(code, 1);
     assert!(!marker.exists());
 
     let _ = fs::remove_file(marker);
@@ -1446,6 +1815,54 @@ async fn grpc_probe_rejects_authority_without_hostname() {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
+async fn grpc_probe_rejects_empty_bracketed_authority_host() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        "127.0.0.1:9",
+        "--authority",
+        "[]:50051",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_probe_rejects_zero_authority_port() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        "127.0.0.1:9",
+        "--authority",
+        "example.com:0",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_probe_rejects_out_of_range_authority_port() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        "127.0.0.1:9",
+        "--authority",
+        "example.com:65536",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
 async fn grpc_probe_rejects_invalid_address() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -1462,6 +1879,14 @@ async fn grpc_probe_rejects_invalid_address() {
 #[tokio::test]
 async fn grpc_probe_rejects_address_without_hostname() {
     let code = salus::main_entry(args(&["salus", "grpc", "--addr", ":50051"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_probe_rejects_embedded_bracket_address_host() {
+    let code = salus::main_entry(args(&["salus", "grpc", "--addr", "example[::1]:50051"])).await;
 
     assert_eq!(code, 3);
 }

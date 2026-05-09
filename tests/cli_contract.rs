@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     io::{Read, Write},
     net::TcpListener,
@@ -37,6 +38,21 @@ fn run_salus_with_env(args: &[&str], envs: &[(&str, Option<&str>)]) -> Output {
     command
         .output()
         .expect("salus test binary must execute with custom environment")
+}
+
+#[cfg(unix)]
+fn run_salus_os(args: &[OsString]) -> Output {
+    Command::new(salus_bin())
+        .args(args)
+        .output()
+        .expect("salus test binary must execute with OS arguments")
+}
+
+#[cfg(unix)]
+fn non_utf8_arg() -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+
+    OsString::from_vec(vec![0xff])
 }
 
 fn temp_file_path(prefix: &str) -> PathBuf {
@@ -348,12 +364,58 @@ fn quiet_suppresses_cli_parse_errors() {
 }
 
 #[test]
+fn expanded_quiet_suppresses_cli_parse_errors() {
+    let output = run_salus_with_env(
+        &["${SALUS_TEST_QUIET}", "--bad-flag"],
+        &[("SALUS_TEST_QUIET", Some("--quiet"))],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn quiet_prescan_does_not_accept_subcommand_options_at_root() {
     let output = run_salus(&["--url", "http://127.0.0.1:8080", "--quiet"]);
 
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--url'"));
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_prescan_stops_at_non_utf8_unknown_argument() {
+    let output = run_salus_os(&[non_utf8_arg(), OsString::from("--quiet")]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_prescan_stops_at_non_utf8_unknown_subcommand_argument() {
+    let output = run_salus_os(&[
+        OsString::from("file"),
+        non_utf8_arg(),
+        OsString::from("--quiet"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn help_prescan_stops_at_non_utf8_unknown_argument() {
+    let output = run_salus_os(&[non_utf8_arg(), OsString::from("--help")]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
 }
 
 #[test]
@@ -411,6 +473,70 @@ fn http_complete_body_at_limit_proves_missing_contains() {
     assert!(output.stdout.is_empty());
     assert!(stderr.contains("does not contain required text \"ready\""));
     assert!(!stderr.contains("truncated"));
+}
+
+#[test]
+fn http_unknown_length_body_at_limit_proves_missing_contains_after_eof() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\n\r\naaaa");
+
+    let output = run_salus(&[
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--max-body",
+        "4",
+        "--contains",
+        "ready",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("does not contain required text \"ready\""));
+    assert!(!stderr.contains("truncated"));
+    assert!(!stderr.contains("cannot prove"));
+}
+
+#[test]
+fn http_truncated_body_with_mismatched_prefix_reports_exact_mismatch() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nxxxxmore");
+
+    let output = run_salus(&[
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--max-body",
+        "4",
+        "--body-equals",
+        "ready",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("does not equal required text \"ready\""));
+    assert!(!stderr.contains("cannot prove"));
+}
+
+#[test]
+fn http_truncated_body_with_forbidden_text_reports_forbidden_text() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nbad-data");
+
+    let output = run_salus(&[
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--max-body",
+        "4",
+        "--not-contains",
+        "bad",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("contains forbidden text \"bad\""));
+    assert!(!stderr.contains("cannot prove"));
 }
 
 #[test]
@@ -637,7 +763,104 @@ fn failure_prints_message_to_stderr_by_default() {
 }
 
 #[test]
-fn exec_output_limit_reports_unproven_required_text() {
+fn tcp_error_escapes_control_characters_in_address() {
+    let output = run_salus(&["tcp", "--addr", "bad\naddr:80"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.contains("bad\naddr:80"));
+    assert!(stderr.contains("\"bad\\naddr:80\""));
+}
+
+#[test]
+fn file_error_escapes_control_characters_in_path() {
+    let path = temp_file_path("salus-cli-bad\npath");
+    let output = run_salus(&["file", "--path", &path.display().to_string()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.contains(&path.display().to_string()));
+    assert!(stderr.contains(&format!("{path:?}")));
+}
+
+#[cfg(unix)]
+#[test]
+fn http_unix_socket_error_escapes_control_characters_in_socket_path() {
+    let socket = Path::new("/tmp/salus-cli-bad\nsock");
+    let output = run_salus(&[
+        "http",
+        "--sock",
+        &socket.display().to_string(),
+        "--path",
+        "/healthz",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.contains(&socket.display().to_string()));
+    assert!(stderr.contains(&format!("{socket:?}")));
+}
+
+#[test]
+fn http_method_error_escapes_control_characters() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--method",
+        "GE\nT",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.contains("GE\nT"));
+    assert!(stderr.contains("\"GE\\nT\""));
+}
+
+#[test]
+fn http_status_error_escapes_control_characters() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--status",
+        "299-200\n",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr.contains("299-200\n"));
+    assert!(stderr.contains("\"299-200\\n\""));
+}
+
+#[test]
+fn exec_complete_output_at_limit_reports_missing_required_text() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "ready",
+        "--max-output",
+        "4",
+        "--",
+        "sh",
+        "-c",
+        "printf aaaa",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("stdout of sh does not contain required text \"ready\""));
+    assert!(!stderr.contains("cannot prove"));
+}
+
+#[test]
+fn exec_inherited_pipe_at_output_limit_reports_missing_required_text_after_cleanup() {
     let output = run_salus(&[
         "exec",
         "--stdout-contains",
@@ -649,10 +872,10 @@ fn exec_output_limit_reports_unproven_required_text() {
         "-c",
         "printf aaaa; sleep 1 &",
     ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "stdout of sh reached --max-output 4 bytes, cannot prove required text \"ready\""
-    ));
+    assert!(stderr.contains("stdout of sh does not contain required text \"ready\""));
+    assert!(!stderr.contains("cannot prove"));
 }

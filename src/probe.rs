@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use crate::output::format_success;
 use crate::{
     cli::Cli,
+    diagnostic,
     error::{AppError, Result},
+    output::{format_success, print_stderr_line},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +59,7 @@ impl ProbeReport {
             return Err(AppError::failure(format!(
                 "{} probe to {} exceeded --max-latency {} (observed {})",
                 self.mode,
-                self.target,
+                diagnostic::value(&self.target),
                 humantime::format_duration(limit),
                 humantime::format_duration(self.elapsed)
             )));
@@ -76,10 +77,12 @@ impl ProbeReport {
         let elapsed = self.elapsed.as_millis();
 
         if self.options.verbose && !quiet {
-            eprintln!(
-                "{}",
-                format_success(self.mode, &self.target, elapsed, self.detail.as_deref())
-            );
+            print_stderr_line(format_success(
+                self.mode,
+                &self.target,
+                elapsed,
+                self.detail.as_deref(),
+            ));
         }
 
         0
@@ -101,12 +104,32 @@ pub fn deadline_after(timeout: Duration) -> Result<tokio::time::Instant> {
 mod tests {
     use std::time::Duration;
 
-    use super::deadline_after;
+    use super::{ProbeOptions, ProbeReport, deadline_after};
 
     #[test]
     fn deadline_after_rejects_overflowing_timeout() {
         let error = deadline_after(Duration::MAX).unwrap_err();
 
         assert!(error.to_string().contains("--timeout is too large"));
+    }
+
+    #[test]
+    fn max_latency_error_escapes_target_controls() {
+        let report = ProbeReport {
+            mode: "file",
+            target: "/tmp/ready\nnext".to_string(),
+            detail: None,
+            elapsed: Duration::from_millis(2),
+            options: ProbeOptions {
+                timeout: Duration::from_secs(1),
+                quiet: false,
+                verbose: false,
+                max_latency: Some(Duration::from_millis(1)),
+            },
+        };
+
+        let error = report.enforce_max_latency().unwrap_err();
+
+        assert!(error.to_string().contains(r#""/tmp/ready\nnext""#));
     }
 }

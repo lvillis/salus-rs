@@ -11,7 +11,6 @@ use hyper::{
     header::HeaderValue,
     header::TRANSFER_ENCODING,
     header::USER_AGENT,
-    http::uri::Authority,
 };
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::{
@@ -23,13 +22,16 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::{
+    authority::{PortPolicy, RawFormat, explicit_port, validate_authority},
     cli::{HttpArgs, TlsArgs},
+    diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport},
     tls::{build_http_tls_config, parse_server_name_override},
 };
 
 const USER_AGENT_VALUE: &str = concat!("salus/", env!("CARGO_PKG_VERSION"));
+const BODY_EOF_GRACE_AFTER_LIMIT: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub async fn run(
     options: ProbeOptions,
@@ -51,6 +53,7 @@ pub async fn run(
         .url
         .as_deref()
         .ok_or_else(|| AppError::invalid_config("--url is required when --sock is not set"))?;
+    validate_raw_url_text(raw_url)?;
     let url = Url::parse(raw_url)
         .map_err(|error| AppError::invalid_config(format!("invalid URL {raw_url}: {error}")))?;
 
@@ -76,6 +79,7 @@ pub async fn run(
             "URL port must be between 1 and 65535",
         ));
     }
+    validate_raw_url_port(raw_url)?;
 
     let host = default_host_header(&url, args.host.as_deref())?;
     let request_uri = url.as_str().to_string();
@@ -121,14 +125,14 @@ async fn run_unix_socket(
         Some(host) => explicit_host_header(host)?,
         None => "localhost".to_string(),
     };
-    let target = format!("unix:{}{}", sock.display(), path);
+    let sock_label = diagnostic::path(sock);
+    let target = format!("unix:{sock_label}{path}");
 
     let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
         let stream = UnixStream::connect(sock).await.map_err(|error| {
             AppError::failure(format!(
-                "failed to connect to unix socket {}: {error}",
-                sock.display()
+                "failed to connect to unix socket {sock_label}: {error}"
             ))
         })?;
         let io = TokioIo::new(stream);
@@ -142,8 +146,7 @@ async fn run_unix_socket(
         let request = build_request(path, &host, &prepared)?;
         let response = sender.send_request(request).await.map_err(|error| {
             AppError::failure(format!(
-                "HTTP request over unix socket {} failed: {error}",
-                sock.display()
+                "HTTP request over unix socket {sock_label} failed: {error}"
             ))
         })?;
         evaluate_response(response, &target, args, &prepared, started, options).await
@@ -236,6 +239,12 @@ fn validate_uds_path(path: &str) -> Result<()> {
             "HTTP UDS --path must start with /",
         ));
     }
+    if path.contains('\\') {
+        return Err(AppError::invalid_config(
+            "HTTP UDS --path must not contain backslashes",
+        ));
+    }
+    validate_percent_encoding(path, "HTTP UDS --path")?;
     if path.contains('#') {
         return Err(AppError::invalid_config(
             "HTTP UDS --path must not contain a URL fragment",
@@ -257,6 +266,66 @@ fn validate_uds_path(path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_raw_url_text(raw_url: &str) -> Result<()> {
+    if raw_url
+        .chars()
+        .any(|ch| ch == '\\' || ch.is_whitespace() || ch.is_control())
+    {
+        return Err(AppError::invalid_config(
+            "--url must not contain unescaped whitespace, control characters, or backslashes",
+        ));
+    }
+    validate_percent_encoding(raw_url, "--url")?;
+
+    Ok(())
+}
+
+fn validate_percent_encoding(raw: &str, label: &str) -> Result<()> {
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+
+    while let Some(offset) = bytes[index..].iter().position(|byte| *byte == b'%') {
+        let percent = index + offset;
+        let valid = bytes.get(percent + 1).is_some_and(u8::is_ascii_hexdigit)
+            && bytes.get(percent + 2).is_some_and(u8::is_ascii_hexdigit);
+        if !valid {
+            return Err(AppError::invalid_config(format!(
+                "{label} contains invalid percent encoding"
+            )));
+        }
+        index = percent + 3;
+    }
+
+    Ok(())
+}
+
+fn validate_raw_url_port(raw_url: &str) -> Result<()> {
+    let authority = raw_url_authority(raw_url)
+        .ok_or_else(|| AppError::invalid_config("URL must include // before the host"))?;
+    if authority.is_empty() {
+        return Err(AppError::invalid_config("URL must contain a host"));
+    }
+    if authority.contains('@') {
+        return Err(AppError::invalid_config(
+            "URL user info is not supported for security reasons",
+        ));
+    }
+    if explicit_port(authority).is_some_and(str::is_empty) {
+        return Err(AppError::invalid_config(
+            "URL port must be between 1 and 65535",
+        ));
+    }
+
+    Ok(())
+}
+
+fn raw_url_authority(raw_url: &str) -> Option<&str> {
+    let (_, rest) = raw_url.split_once(':')?;
+    let rest = rest.strip_prefix("//")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 fn validate_non_empty_assertions(flag: &str, values: &[String]) -> Result<()> {
@@ -372,7 +441,8 @@ fn parse_method(raw: &str) -> Result<Method> {
         "GET" => Ok(Method::GET),
         "HEAD" => Ok(Method::HEAD),
         other => Err(AppError::invalid_config(format!(
-            "unsupported HTTP method {other}, expected GET or HEAD"
+            "unsupported HTTP method {}, expected GET or HEAD",
+            diagnostic::value(other)
         ))),
     }
 }
@@ -478,35 +548,7 @@ fn explicit_host_header(raw: &str) -> Result<String> {
 }
 
 fn validate_host_header(host: &str) -> Result<()> {
-    if host.contains('@') {
-        return Err(AppError::invalid_config(format!(
-            "invalid Host header {host:?}: user info is not allowed"
-        )));
-    }
-
-    let authority = host.parse::<Authority>().map_err(|error| {
-        AppError::invalid_config(format!("invalid Host header {host:?}: {error}"))
-    })?;
-    if authority.host().is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "invalid Host header {host:?}: host must not be empty"
-        )));
-    }
-
-    let port_part = authority
-        .as_str()
-        .strip_prefix(authority.host())
-        .unwrap_or_default();
-    if !port_part.is_empty() && authority.port_u16().is_none() {
-        return Err(AppError::invalid_config(format!(
-            "invalid Host header {host:?}: port must be a valid integer"
-        )));
-    }
-    if authority.port_u16() == Some(0) {
-        return Err(AppError::invalid_config(format!(
-            "invalid Host header {host:?}: port must be between 1 and 65535"
-        )));
-    }
+    validate_authority(host, "Host header", PortPolicy::Optional, RawFormat::Debug)?;
 
     HeaderValue::from_str(host)
         .map(|_| ())
@@ -528,7 +570,8 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
             let end = parse_status_code(end.trim())?;
             if start > end {
                 return Err(AppError::invalid_config(format!(
-                    "invalid status range {raw}, start is greater than end"
+                    "invalid status range {}, start is greater than end",
+                    diagnostic::value(raw)
                 )));
             }
             StatusRange { start, end }
@@ -546,7 +589,10 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
 
 fn parse_status_code(raw: &str) -> Result<u16> {
     let code = raw.parse::<u16>().map_err(|_| {
-        AppError::invalid_config(format!("invalid status code {raw}, expected integer"))
+        AppError::invalid_config(format!(
+            "invalid status code {}, expected integer",
+            diagnostic::value(raw)
+        ))
     })?;
     if !(100..=599).contains(&code) {
         return Err(AppError::invalid_config(format!(
@@ -693,16 +739,22 @@ fn early_body_contains_assertions(args: &HttpArgs) -> &[String] {
 
 fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> Result<()> {
     if let Some(expected) = &args.body_equals {
+        if body.bytes != expected.as_bytes() {
+            if body.truncated && expected.as_bytes().starts_with(&body.bytes) {
+                return Err(AppError::failure(format!(
+                    "response body from {} was truncated at {} bytes, cannot prove exact body match",
+                    target, args.max_body
+                )));
+            }
+            return Err(AppError::failure(format!(
+                "response body from {} does not equal required text {:?}",
+                target, expected
+            )));
+        }
         if body.truncated {
             return Err(AppError::failure(format!(
                 "response body from {} was truncated at {} bytes, cannot prove exact body match",
                 target, args.max_body
-            )));
-        }
-        if body.bytes != expected.as_bytes() {
-            return Err(AppError::failure(format!(
-                "response body from {} does not equal required text {:?}",
-                target, expected
             )));
         }
     }
@@ -722,12 +774,6 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
         }
     }
 
-    if body.truncated && !args.not_contains.is_empty() {
-        return Err(AppError::failure(
-            "response body was truncated, cannot prove negative body assertions",
-        ));
-    }
-
     for needle in &args.not_contains {
         if contains_bytes(&body.bytes, needle) {
             return Err(AppError::failure(format!(
@@ -735,6 +781,12 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
                 target, needle
             )));
         }
+    }
+
+    if body.truncated && !args.not_contains.is_empty() {
+        return Err(AppError::failure(
+            "response body was truncated, cannot prove negative body assertions",
+        ));
     }
 
     Ok(())
@@ -771,17 +823,50 @@ async fn read_body(
                 break;
             }
 
-            if truncated
-                || (declared_body_exceeds_limit && bytes.len() == limit)
-                || (!early_contains.is_empty() && bytes.len() == limit && body_may_exceed_limit)
-            {
+            if truncated || (declared_body_exceeds_limit && bytes.len() == limit) {
                 truncated = true;
+                break;
+            }
+            if bytes.len() == limit && body_may_exceed_limit {
+                truncated = match wait_for_body_eof_after_limit(&mut body).await? {
+                    BodyLimitWait::Complete => false,
+                    BodyLimitWait::StillOpen | BodyLimitWait::MoreBody => true,
+                };
                 break;
             }
         }
     }
 
     Ok(BufferedBody { bytes, truncated })
+}
+
+enum BodyLimitWait {
+    Complete,
+    StillOpen,
+    MoreBody,
+}
+
+async fn wait_for_body_eof_after_limit(body: &mut Incoming) -> Result<BodyLimitWait> {
+    let grace_sleep = tokio::time::sleep(BODY_EOF_GRACE_AFTER_LIMIT);
+    tokio::pin!(grace_sleep);
+
+    loop {
+        tokio::select! {
+            frame = body.frame() => {
+                let Some(frame) = frame else {
+                    return Ok(BodyLimitWait::Complete);
+                };
+                let frame = frame
+                    .map_err(|error| AppError::failure(format!("failed reading HTTP body: {error}")))?;
+                if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+                    return Ok(BodyLimitWait::MoreBody);
+                }
+            }
+            () = &mut grace_sleep => {
+                return Ok(BodyLimitWait::StillOpen);
+            }
+        }
+    }
 }
 
 fn contains_all(bytes: &[u8], needles: &[String]) -> bool {
