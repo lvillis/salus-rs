@@ -123,9 +123,8 @@ async fn run_inner(
 
         if !args.contains.is_empty() {
             let file_body = read_file(&mut file, &args.path, args.max_read, &args.contains).await?;
-            let body = String::from_utf8_lossy(&file_body.bytes);
             for needle in &args.contains {
-                if !body.contains(needle) {
+                if !contains_bytes(&file_body.bytes, needle) {
                     if file_body.truncated {
                         return Err(AppError::failure(format!(
                             "file {} was truncated at {} bytes, cannot prove required text {:?}",
@@ -196,6 +195,12 @@ async fn read_file(
 }
 
 fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
-    let body = String::from_utf8_lossy(bytes);
-    required_texts.iter().all(|needle| body.contains(needle))
+    required_texts
+        .iter()
+        .all(|needle| contains_bytes(bytes, needle))
+}
+
+fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
 }

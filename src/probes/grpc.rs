@@ -163,6 +163,11 @@ fn validate_authority(raw: &str, label: &str, require_port: bool) -> Result<()> 
             "invalid {label} {raw:?}: user info is not allowed"
         )));
     }
+    if authority.host().is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "invalid {label} {raw:?}: host must not be empty"
+        )));
+    }
 
     let port_part = authority
         .as_str()
@@ -176,6 +181,11 @@ fn validate_authority(raw: &str, label: &str, require_port: bool) -> Result<()> 
     if require_port && port_part.is_empty() {
         return Err(AppError::invalid_config(format!(
             "invalid {label} {raw:?}: port is required"
+        )));
+    }
+    if require_port && authority.port_u16() == Some(0) {
+        return Err(AppError::invalid_config(format!(
+            "invalid {label} {raw:?}: port must be between 1 and 65535"
         )));
     }
 

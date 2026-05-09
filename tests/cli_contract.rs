@@ -154,6 +154,47 @@ fn help_does_not_require_environment_expansion() {
 }
 
 #[test]
+fn help_does_not_parse_environment_expanded_durations() {
+    let output = run_salus_with_env(
+        &["--timeout", "${SALUS_TEST_MISSING_ENV}", "--help"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.contains("Container health check probe runner"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn version_does_not_parse_environment_expanded_durations() {
+    let output = run_salus_with_env(
+        &["--timeout", "${SALUS_TEST_MISSING_ENV}", "--version"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.starts_with("salus "));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn subcommand_version_does_not_skip_environment_expansion() {
+    let output = run_salus_with_env(
+        &["http", "--url", "${SALUS_TEST_MISSING_ENV}", "--version"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
+}
+
+#[test]
 fn invalid_duration_exits_three_and_prints_to_stderr() {
     let path = temp_file_path("salus-cli-invalid-duration");
     write_file(&path, b"ready\n");
@@ -307,6 +348,30 @@ fn quiet_suppresses_cli_parse_errors() {
 }
 
 #[test]
+fn quiet_prescan_does_not_accept_subcommand_options_at_root() {
+    let output = run_salus(&["--url", "http://127.0.0.1:8080", "--quiet"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--url'"));
+}
+
+#[test]
+fn exec_command_arguments_do_not_enable_quiet_for_environment_errors() {
+    let output = run_salus_with_env(
+        &["exec", "sh", "--quiet", "${SALUS_TEST_MISSING_ENV}"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
+}
+
+#[test]
 fn environment_variable_expansion_reaches_http_probe_arguments() {
     let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     let port = addr.port().to_string();
@@ -325,6 +390,27 @@ fn environment_variable_expansion_reaches_http_probe_arguments() {
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn http_complete_body_at_limit_proves_missing_contains() {
+    let addr = spawn_http_server("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\naaaa");
+
+    let output = run_salus(&[
+        "http",
+        "--url",
+        &format!("http://{addr}/healthz"),
+        "--max-body",
+        "4",
+        "--contains",
+        "ready",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("does not contain required text \"ready\""));
+    assert!(!stderr.contains("truncated"));
 }
 
 #[test]
@@ -350,6 +436,116 @@ fn environment_variable_expansion_reaches_exec_trailing_arguments() {
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_command_arguments_do_not_disable_environment_expansion() {
+    let output = run_salus_with_env(
+        &[
+            "exec",
+            "--stdout-contains",
+            "${SALUS_TEST_EXEC_NEEDLE}",
+            "sh",
+            "-c",
+            "printf ready",
+            "-h",
+        ],
+        &[("SALUS_TEST_EXEC_NEEDLE", Some("ready"))],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_help_does_not_require_environment_expansion() {
+    let output = run_salus_with_env(
+        &[
+            "exec",
+            "--stdout-contains",
+            "${SALUS_TEST_MISSING_ENV}",
+            "--help",
+        ],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.contains("Run a command and evaluate its exit code and output"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_help_does_not_parse_environment_expanded_durations() {
+    let output = run_salus_with_env(
+        &["exec", "--timeout", "${SALUS_TEST_MISSING_ENV}", "--help"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stdout.contains("Run a command and evaluate its exit code and output"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_version_argument_does_not_skip_environment_expansion() {
+    let output = run_salus_with_env(
+        &[
+            "exec",
+            "--stdout-contains",
+            "${SALUS_TEST_MISSING_ENV}",
+            "--version",
+        ],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
+}
+
+#[test]
+fn exec_version_argument_does_not_enable_quiet() {
+    let output = run_salus_with_env(
+        &["exec", "-V", "--quiet", "${SALUS_TEST_MISSING_ENV}"],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
+}
+
+#[test]
+fn option_value_positions_named_like_help_are_not_treated_as_help() {
+    let output = run_salus(&["file", "--path", "/tmp/salus-test", "--max-age", "--help"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("a value is required for '--max-age <DURATION>'")
+    );
+}
+
+#[test]
+fn option_value_positions_named_like_quiet_do_not_suppress_errors() {
+    let output = run_salus(&["file", "--path", "/tmp/salus-test", "--max-age", "--quiet"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("a value is required for '--max-age <DURATION>'")
+    );
 }
 
 #[test]

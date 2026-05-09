@@ -1,5 +1,7 @@
 use std::{ffi::OsString, process::Stdio, time::Duration};
 
+#[cfg(unix)]
+use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
@@ -58,6 +60,7 @@ pub async fn run(
     let mut command = Command::new(program);
     command.args(args.command.iter().skip(1));
     command.kill_on_drop(true);
+    configure_process_group(&mut command);
     command.stdin(Stdio::null());
     command.stdout(if capture_stdout {
         Stdio::piped()
@@ -79,6 +82,7 @@ pub async fn run(
         }
         _ => AppError::internal(format!("failed to spawn {:?}: {error}", program)),
     })?;
+    let process_group = child_process_group(&child);
 
     let mut stdout_task = if capture_stdout {
         let stdout = child
@@ -111,17 +115,22 @@ pub async fn run(
     let status = match tokio::time::timeout(options.timeout, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(error)) => {
+            terminate_child(&mut child, process_group);
             abort_output_tasks(&stdout_task, &stderr_task);
             return Err(AppError::internal(format!(
                 "failed waiting for child: {error}"
             )));
         }
         Err(_) => {
-            let _ = child.kill().await;
+            terminate_child(&mut child, process_group);
             abort_output_tasks(&stdout_task, &stderr_task);
+            let _reaper = tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
             return Err(command_timeout_error(&command_label, options.timeout));
         }
     };
+    let _process_group_cleanup = ProcessGroupCleanup::new(process_group);
 
     let code = match status.code() {
         Some(code) => code,
@@ -164,9 +173,8 @@ pub async fn run(
     )
     .await?;
 
-    let stdout_text = String::from_utf8_lossy(&stdout.bytes);
     for needle in &args.stdout_contains {
-        if !stdout_text.contains(needle) {
+        if !contains_bytes(&stdout.bytes, needle) {
             if stdout.cannot_prove_absence() {
                 return Err(output_limit_error(
                     "stdout",
@@ -182,9 +190,8 @@ pub async fn run(
         }
     }
 
-    let stderr_text = String::from_utf8_lossy(&stderr.bytes);
     for needle in &args.stderr_contains {
-        if !stderr_text.contains(needle) {
+        if !contains_bytes(&stderr.bytes, needle) {
             if stderr.cannot_prove_absence() {
                 return Err(output_limit_error(
                     "stderr",
@@ -325,6 +332,77 @@ fn output_limit_error(
     ))
 }
 
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn child_process_group(child: &tokio::process::Child) -> Option<Pid> {
+    child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .and_then(Pid::from_raw)
+}
+
+#[cfg(not(unix))]
+fn child_process_group(_child: &tokio::process::Child) -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut tokio::process::Child, process_group: Option<Pid>) {
+    terminate_process_group(process_group);
+    let _ = child.start_kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut tokio::process::Child, _process_group: Option<()>) {
+    let _ = child.start_kill();
+}
+
+#[cfg(unix)]
+fn terminate_process_group(process_group: Option<Pid>) {
+    if let Some(process_group) = process_group {
+        let _ = kill_process_group(process_group, Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_process_group: Option<()>) {}
+
+#[cfg(unix)]
+struct ProcessGroupCleanup {
+    process_group: Option<Pid>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupCleanup {
+    fn new(process_group: Option<Pid>) -> Self {
+        Self { process_group }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupCleanup {
+    fn drop(&mut self) {
+        terminate_process_group(self.process_group.take());
+    }
+}
+
+#[cfg(not(unix))]
+struct ProcessGroupCleanup;
+
+#[cfg(not(unix))]
+impl ProcessGroupCleanup {
+    fn new(_process_group: Option<()>) -> Self {
+        Self
+    }
+}
+
 fn spawn_output_capture<R>(reader: R, limit: usize, required_texts: Vec<String>) -> OutputCapture
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -417,10 +495,14 @@ impl BufferedOutput {
 }
 
 fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
-    let text = String::from_utf8_lossy(bytes);
     required_texts
         .iter()
-        .all(|required| text.contains(required))
+        .all(|required| contains_bytes(bytes, required))
+}
+
+fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
 }
 
 fn os_string_lossy(value: &OsString) -> String {

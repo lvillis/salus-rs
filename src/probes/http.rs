@@ -2,7 +2,7 @@ use std::path::Path;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::{
-    HeaderMap, Method, Request, Response,
+    HeaderMap, Method, Request, Response, Uri,
     body::{Body, Bytes, Incoming},
     client::conn::http1,
     header::CONTENT_LENGTH,
@@ -71,6 +71,11 @@ pub async fn run(
             "URL fragments are not supported in HTTP probes",
         ));
     }
+    if url.port() == Some(0) {
+        return Err(AppError::invalid_config(
+            "URL port must be between 1 and 65535",
+        ));
+    }
 
     let host = default_host_header(&url, args.host.as_deref())?;
     let request_uri = url.as_str().to_string();
@@ -110,11 +115,7 @@ async fn run_unix_socket(
     path: &str,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    if !path.starts_with('/') {
-        return Err(AppError::invalid_config(
-            "HTTP UDS --path must start with /",
-        ));
-    }
+    validate_uds_path(path)?;
 
     let host = match args.host.as_deref() {
         Some(host) => explicit_host_header(host)?,
@@ -196,19 +197,8 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
         if args.path.is_none() {
             return Err(AppError::invalid_config("--path is required with --sock"));
         }
-        if args
-            .path
-            .as_deref()
-            .is_some_and(|path| !path.starts_with('/'))
-        {
-            return Err(AppError::invalid_config(
-                "HTTP UDS --path must start with /",
-            ));
-        }
-        if args.path.as_deref().is_some_and(|path| path.contains('#')) {
-            return Err(AppError::invalid_config(
-                "HTTP UDS --path must not contain a URL fragment",
-            ));
+        if let Some(path) = args.path.as_deref() {
+            validate_uds_path(path)?;
         }
 
         if has_tls_flags(&args.tls) {
@@ -234,6 +224,35 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
     if parse_method(&args.method)? == Method::HEAD && has_body_assertions(args) {
         return Err(AppError::invalid_config(
             "HTTP body assertions are not supported with HEAD requests",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_uds_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(AppError::invalid_config(
+            "HTTP UDS --path must start with /",
+        ));
+    }
+    if path.contains('#') {
+        return Err(AppError::invalid_config(
+            "HTTP UDS --path must not contain a URL fragment",
+        ));
+    }
+
+    let uri = path
+        .parse::<Uri>()
+        .map_err(|error| AppError::invalid_config(format!("invalid HTTP UDS --path: {error}")))?;
+    if uri.scheme().is_some() || uri.authority().is_some() {
+        return Err(AppError::invalid_config(
+            "HTTP UDS --path must be an origin-form path, not an absolute URI",
+        ));
+    }
+    if uri.path().is_empty() {
+        return Err(AppError::invalid_config(
+            "HTTP UDS --path must contain a path",
         ));
     }
 
@@ -468,6 +487,12 @@ fn validate_host_header(host: &str) -> Result<()> {
     let authority = host.parse::<Authority>().map_err(|error| {
         AppError::invalid_config(format!("invalid Host header {host:?}: {error}"))
     })?;
+    if authority.host().is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "invalid Host header {host:?}: host must not be empty"
+        )));
+    }
+
     let port_part = authority
         .as_str()
         .strip_prefix(authority.host())
@@ -475,6 +500,11 @@ fn validate_host_header(host: &str) -> Result<()> {
     if !port_part.is_empty() && authority.port_u16().is_none() {
         return Err(AppError::invalid_config(format!(
             "invalid Host header {host:?}: port must be a valid integer"
+        )));
+    }
+    if authority.port_u16() == Some(0) {
+        return Err(AppError::invalid_config(format!(
+            "invalid Host header {host:?}: port must be between 1 and 65535"
         )));
     }
 
@@ -606,7 +636,7 @@ fn assert_response_headers(
         let matches = headers
             .get_all(&assertion.name)
             .iter()
-            .any(|value| String::from_utf8_lossy(value.as_bytes()) == assertion.value);
+            .any(|value| value.as_bytes() == assertion.value.as_bytes());
         if !matches {
             return Err(AppError::failure(format!(
                 "response header {} from {} does not equal required value {:?}",
@@ -619,7 +649,7 @@ fn assert_response_headers(
         let matches = headers
             .get_all(&assertion.name)
             .iter()
-            .any(|value| String::from_utf8_lossy(value.as_bytes()).contains(&assertion.value));
+            .any(|value| contains_bytes(value.as_bytes(), &assertion.value));
         if !matches {
             return Err(AppError::failure(format!(
                 "response header {} from {} does not contain required text {:?}",
@@ -632,7 +662,7 @@ fn assert_response_headers(
         let matches = headers
             .get_all(&assertion.name)
             .iter()
-            .any(|value| String::from_utf8_lossy(value.as_bytes()).contains(&assertion.value));
+            .any(|value| contains_bytes(value.as_bytes(), &assertion.value));
         if matches {
             return Err(AppError::failure(format!(
                 "response header {} from {} contains forbidden text {:?}",
@@ -662,8 +692,6 @@ fn early_body_contains_assertions(args: &HttpArgs) -> &[String] {
 }
 
 fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> Result<()> {
-    let body_text = String::from_utf8_lossy(&body.bytes);
-
     if let Some(expected) = &args.body_equals {
         if body.truncated {
             return Err(AppError::failure(format!(
@@ -671,7 +699,7 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
                 target, args.max_body
             )));
         }
-        if body_text != expected.as_str() {
+        if body.bytes != expected.as_bytes() {
             return Err(AppError::failure(format!(
                 "response body from {} does not equal required text {:?}",
                 target, expected
@@ -680,7 +708,7 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
     }
 
     for needle in &args.contains {
-        if !body_text.contains(needle) {
+        if !contains_bytes(&body.bytes, needle) {
             if body.truncated {
                 return Err(AppError::failure(format!(
                     "response body from {} was truncated at {} bytes, cannot prove required text {:?}",
@@ -701,7 +729,7 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
     }
 
     for needle in &args.not_contains {
-        if body_text.contains(needle) {
+        if contains_bytes(&body.bytes, needle) {
             return Err(AppError::failure(format!(
                 "response body from {} contains forbidden text {:?}",
                 target, needle
@@ -722,6 +750,7 @@ async fn read_body(
     let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
     let body_size_upper = body.size_hint().upper();
     let declared_body_exceeds_limit = body_size_upper.is_some_and(|upper| upper > limit_u64);
+    let body_may_exceed_limit = body_size_upper.is_none_or(|upper| upper > limit_u64);
 
     while let Some(frame) = body.frame().await {
         let frame = frame
@@ -744,7 +773,7 @@ async fn read_body(
 
             if truncated
                 || (declared_body_exceeds_limit && bytes.len() == limit)
-                || (!early_contains.is_empty() && bytes.len() == limit)
+                || (!early_contains.is_empty() && bytes.len() == limit && body_may_exceed_limit)
             {
                 truncated = true;
                 break;
@@ -756,8 +785,12 @@ async fn read_body(
 }
 
 fn contains_all(bytes: &[u8], needles: &[String]) -> bool {
-    let body_text = String::from_utf8_lossy(bytes);
-    needles.iter().all(|needle| body_text.contains(needle))
+    needles.iter().all(|needle| contains_bytes(bytes, needle))
+}
+
+fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
 }
 
 #[cfg(test)]

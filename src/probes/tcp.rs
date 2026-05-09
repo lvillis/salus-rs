@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use hyper::http::uri::Authority;
 use tokio::net::{TcpStream, lookup_host};
 
 use crate::{
@@ -17,6 +18,7 @@ pub async fn run(
     if args.addr.is_empty() {
         return Err(AppError::invalid_config("--addr must not be empty"));
     }
+    validate_tcp_addr(&args.addr)?;
 
     let result = tokio::time::timeout(timeout, async {
         let addrs = lookup_host(&args.addr)
@@ -81,6 +83,44 @@ pub async fn run(
             humantime::format_duration(timeout)
         ))),
     }
+}
+
+fn validate_tcp_addr(raw: &str) -> Result<()> {
+    let authority = raw
+        .parse::<Authority>()
+        .map_err(|error| AppError::invalid_config(format!("invalid TCP address {raw}: {error}")))?;
+    if raw.contains('@') {
+        return Err(AppError::invalid_config(format!(
+            "invalid TCP address {raw}: user info is not allowed"
+        )));
+    }
+    if authority.host().is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "invalid TCP address {raw}: host must not be empty"
+        )));
+    }
+
+    let port_part = authority
+        .as_str()
+        .strip_prefix(authority.host())
+        .unwrap_or_default();
+    if port_part.is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "invalid TCP address {raw}: port is required"
+        )));
+    }
+    let Some(port) = authority.port_u16() else {
+        return Err(AppError::invalid_config(format!(
+            "invalid TCP address {raw}: port must be a valid integer"
+        )));
+    };
+    if port == 0 {
+        return Err(AppError::invalid_config(format!(
+            "invalid TCP address {raw}: port must be between 1 and 65535"
+        )));
+    }
+
+    Ok(())
 }
 
 fn per_attempt_timeout(remaining: Duration, attempts_left: usize) -> Duration {

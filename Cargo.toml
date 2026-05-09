@@ -53,6 +53,10 @@ tower-service = { version = "0.3.3", default-features = false, optional = true }
 # Shared error definitions
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 
+[target.'cfg(unix)'.dependencies]
+# Safe Unix process group signalling for exec probe cleanup
+rustix = { version = "1.1.4", default-features = false, features = ["process"] }
+
 [dev-dependencies]
 # Async runtime shared with production code
 tokio = { version = "1.52.3", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
