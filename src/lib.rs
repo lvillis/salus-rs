@@ -19,6 +19,7 @@ mod error;
 mod output;
 mod probe;
 mod probes;
+mod text_match;
 mod tls;
 
 use std::ffi::{OsStr, OsString};
@@ -39,9 +40,13 @@ where
     let args = if let Some(args) = help_or_version_args(&raw_args) {
         args
     } else {
-        match env_expand::expand_argv(raw_args) {
+        match env_expand::expand_argv_with_partial(raw_args) {
             Ok(args) => args,
-            Err(error) => return error.print_and_exit_code_with_quiet(raw_quiet_requested),
+            Err(error) => {
+                let (error, partial_args) = error.into_parts();
+                let quiet_requested = raw_quiet_requested || requests_quiet(&partial_args);
+                return error.print_and_exit_code_with_quiet(quiet_requested);
+            }
         }
     };
     let quiet_requested = raw_quiet_requested || requests_quiet(&args);
@@ -113,6 +118,9 @@ fn help_or_version_args(args: &[OsString]) -> Option<Vec<OsString>> {
         }
         if command.is_none() && is_version(arg) {
             return Some(control_args(program, None, arg));
+        }
+        if command.is_none() && arg == "help" {
+            return Some(help_subcommand_args(program, &args[index + 1..]));
         }
 
         if is_bool_option(arg, command) {
@@ -256,6 +264,20 @@ fn control_args(program: &OsString, command: Option<&'static str>, flag: &str) -
     }
     args.push(OsString::from(flag));
     args
+}
+
+fn help_subcommand_args(program: &OsString, args: &[OsString]) -> Vec<OsString> {
+    let mut control_args = Vec::with_capacity(3);
+    control_args.push(program.clone());
+    control_args.push(OsString::from("help"));
+    if let Some(command) = args.first() {
+        if command.to_str().is_some_and(is_help) {
+            control_args.push(OsString::from("help"));
+        } else {
+            control_args.push(command.clone());
+        }
+    }
+    control_args
 }
 
 fn subcommand_name(arg: &str) -> Option<&'static str> {

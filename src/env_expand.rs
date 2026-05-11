@@ -2,7 +2,20 @@ use std::ffi::OsString;
 
 use crate::error::{AppError, Result};
 
-pub fn expand_argv<I, T>(args: I) -> Result<Vec<OsString>>
+pub struct ExpandArgvError {
+    error: AppError,
+    partial_args: Vec<OsString>,
+}
+
+impl ExpandArgvError {
+    pub fn into_parts(self) -> (AppError, Vec<OsString>) {
+        (self.error, self.partial_args)
+    }
+}
+
+pub fn expand_argv_with_partial<I, T>(
+    args: I,
+) -> std::result::Result<Vec<OsString>, ExpandArgvError>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
@@ -15,7 +28,15 @@ where
     }
 
     for arg in iter {
-        expanded.push(expand_arg_os(arg.into(), &lookup_env)?);
+        match expand_arg_os(arg.into(), &lookup_env) {
+            Ok(arg) => expanded.push(arg),
+            Err(error) => {
+                return Err(ExpandArgvError {
+                    error,
+                    partial_args: expanded,
+                });
+            }
+        }
     }
 
     Ok(expanded)

@@ -1,10 +1,14 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    task::{Context, Poll},
+};
 
 use http_body_util::{BodyExt, Empty};
+#[cfg(unix)]
+use hyper::client::conn::http1;
 use hyper::{
     HeaderMap, Method, Request, Response, Uri,
     body::{Body, Bytes, Incoming},
-    client::conn::http1,
     header::CONTENT_LENGTH,
     header::HOST,
     header::HeaderName,
@@ -13,25 +17,30 @@ use hyper::{
     header::USER_AGENT,
 };
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
+#[cfg(unix)]
+use hyper_util::rt::TokioIo;
 use hyper_util::{
-    client::legacy::Client,
-    rt::{TokioExecutor, TokioIo},
+    client::legacy::{Client, connect::HttpConnector},
+    rt::TokioExecutor,
 };
-use tokio::net::UnixStream;
-use tokio::task::JoinHandle;
-use url::Url;
+#[cfg(unix)]
+use tokio::{net::UnixStream, task::JoinHandle};
+use tower_service::Service;
+use url::{Host, Position, Url};
 
 use crate::{
     authority::{PortPolicy, RawFormat, explicit_port, validate_authority},
     cli::{HttpArgs, TlsArgs},
     diagnostic,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport},
-    tls::{build_http_tls_config, parse_server_name_override},
+    probe::{MAX_CAPTURE_BYTES, ProbeOptions, ProbeReport},
+    text_match::{TextMatcher, contains_bytes},
+    tls::{build_http_tls_config, parse_server_name_override, validate_tls_options},
 };
 
 const USER_AGENT_VALUE: &str = concat!("salus/", env!("CARGO_PKG_VERSION"));
-const BODY_EOF_GRACE_AFTER_LIMIT: std::time::Duration = std::time::Duration::from_millis(50);
+// Give hyper a short window to surface EOF for unknown-length bodies that end exactly at --max-body.
+const BODY_EOF_GRACE_AFTER_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub async fn run(
     options: ProbeOptions,
@@ -82,7 +91,8 @@ pub async fn run(
     validate_raw_url_port(raw_url)?;
 
     let host = default_host_header(&url, args.host.as_deref())?;
-    let request_uri = url.as_str().to_string();
+    let request_uri = request_uri_for_url(&url, args.host.as_ref().map(|_| host.as_str()))?;
+    let connect_uri = connect_uri_for_url(&url)?;
     let uses_tls = url.scheme() == "https";
 
     if !uses_tls && has_tls_flags(&args.tls) {
@@ -90,10 +100,13 @@ pub async fn run(
             "TLS flags may only be used with https URLs",
         ));
     }
+    if uses_tls {
+        validate_tls_options(&args.tls)?;
+    }
 
     let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
-        let client = build_http_client(&args.tls)?;
+        let client = build_http_client(&args.tls, connect_uri)?;
         let request = build_request(&request_uri, &host, &prepared)?;
         let response = client.request(request).await.map_err(|error| {
             AppError::failure(format!("HTTP request to {raw_url} failed: {error}"))
@@ -111,6 +124,7 @@ pub async fn run(
     }
 }
 
+#[cfg(unix)]
 async fn run_unix_socket(
     options: ProbeOptions,
     args: &HttpArgs,
@@ -162,16 +176,33 @@ async fn run_unix_socket(
     }
 }
 
+#[cfg(not(unix))]
+async fn run_unix_socket(
+    _options: ProbeOptions,
+    _args: &HttpArgs,
+    _prepared: PreparedHttpArgs,
+    _sock: &Path,
+    _path: &str,
+    _started: std::time::Instant,
+) -> Result<ProbeReport> {
+    Err(AppError::invalid_config(
+        "HTTP over Unix sockets is only supported on Unix platforms",
+    ))
+}
+
+#[cfg(unix)]
 struct AbortOnDrop<T> {
     handle: JoinHandle<T>,
 }
 
+#[cfg(unix)]
 impl<T> AbortOnDrop<T> {
     fn new(handle: JoinHandle<T>) -> Self {
         Self { handle }
     }
 }
 
+#[cfg(unix)]
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.handle.abort();
@@ -190,25 +221,7 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
     }?;
 
     if args.sock.is_some() {
-        if args
-            .sock
-            .as_ref()
-            .is_some_and(|sock| sock.as_os_str().is_empty())
-        {
-            return Err(AppError::invalid_config("--sock must not be empty"));
-        }
-        if args.path.is_none() {
-            return Err(AppError::invalid_config("--path is required with --sock"));
-        }
-        if let Some(path) = args.path.as_deref() {
-            validate_uds_path(path)?;
-        }
-
-        if has_tls_flags(&args.tls) {
-            return Err(AppError::invalid_config(
-                "TLS flags are not supported with --sock",
-            ));
-        }
+        validate_unix_socket_args(args)?;
     } else if args.path.is_some() {
         return Err(AppError::invalid_config(
             "--path may only be used with --sock",
@@ -219,6 +232,11 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
         return Err(AppError::invalid_config(
             "--max-body must be greater than 0 when body assertions are used",
         ));
+    }
+    if args.max_body > MAX_CAPTURE_BYTES && has_body_assertions(args) {
+        return Err(AppError::invalid_config(format!(
+            "--max-body must be at most {MAX_CAPTURE_BYTES} bytes when body assertions are used"
+        )));
     }
 
     validate_non_empty_assertions("--contains", &args.contains)?;
@@ -233,6 +251,39 @@ fn validate_http_args(args: &HttpArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn validate_unix_socket_args(args: &HttpArgs) -> Result<()> {
+    if args
+        .sock
+        .as_ref()
+        .is_some_and(|sock| sock.as_os_str().is_empty())
+    {
+        return Err(AppError::invalid_config("--sock must not be empty"));
+    }
+    if args.path.is_none() {
+        return Err(AppError::invalid_config("--path is required with --sock"));
+    }
+    if let Some(path) = args.path.as_deref() {
+        validate_uds_path(path)?;
+    }
+
+    if has_tls_flags(&args.tls) {
+        return Err(AppError::invalid_config(
+            "TLS flags are not supported with --sock",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_unix_socket_args(_args: &HttpArgs) -> Result<()> {
+    Err(AppError::invalid_config(
+        "HTTP over Unix sockets is only supported on Unix platforms",
+    ))
+}
+
+#[cfg(unix)]
 fn validate_uds_path(path: &str) -> Result<()> {
     if !path.starts_with('/') {
         return Err(AppError::invalid_config(
@@ -269,6 +320,9 @@ fn validate_uds_path(path: &str) -> Result<()> {
 }
 
 fn validate_raw_url_text(raw_url: &str) -> Result<()> {
+    if raw_url.is_empty() {
+        return Err(AppError::invalid_config("--url must not be empty"));
+    }
     if raw_url
         .chars()
         .any(|ch| ch == '\\' || ch.is_whitespace() || ch.is_control())
@@ -346,14 +400,10 @@ fn has_tls_flags(tls: &TlsArgs) -> bool {
         || tls.insecure_skip_verify
 }
 
-fn build_http_client(
-    tls: &TlsArgs,
-) -> Result<
-    Client<
-        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        Empty<Bytes>,
-    >,
-> {
+type HttpClient =
+    Client<FixedConnectUriConnector<hyper_rustls::HttpsConnector<HttpConnector>>, Empty<Bytes>>;
+
+fn build_http_client(tls: &TlsArgs, connect_uri: Uri) -> Result<HttpClient> {
     let tls_config = build_http_tls_config(tls)?;
     let builder = HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
@@ -365,7 +415,37 @@ fn build_http_client(
         None => builder,
     };
     let https = builder.enable_http1().enable_http2().build();
-    Ok(Client::builder(TokioExecutor::new()).build(https))
+    Ok(Client::builder(TokioExecutor::new())
+        .build(FixedConnectUriConnector::new(https, connect_uri)))
+}
+
+#[derive(Clone)]
+struct FixedConnectUriConnector<C> {
+    inner: C,
+    connect_uri: Uri,
+}
+
+impl<C> FixedConnectUriConnector<C> {
+    fn new(inner: C, connect_uri: Uri) -> Self {
+        Self { inner, connect_uri }
+    }
+}
+
+impl<C> Service<Uri> for FixedConnectUriConnector<C>
+where
+    C: Service<Uri>,
+{
+    type Response = C::Response;
+    type Error = C::Error;
+    type Future = C::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, _uri: Uri) -> Self::Future {
+        self.inner.call(self.connect_uri.clone())
+    }
 }
 
 fn build_request(
@@ -418,12 +498,7 @@ async fn evaluate_response(
         ));
     }
 
-    let body = read_body(
-        response.into_body(),
-        args.max_body,
-        early_body_contains_assertions(args),
-    )
-    .await?;
+    let body = read_body(response.into_body(), args.max_body, args).await?;
     assert_response_body(&body, args, target)?;
 
     Ok(ProbeReport::new(
@@ -466,12 +541,31 @@ fn parse_headers(raw_headers: &[String]) -> Result<Vec<(HeaderName, HeaderValue)
                 "--header cannot set HTTP framing header {name}"
             )));
         }
+        if is_hop_by_hop_header(&name) {
+            return Err(AppError::invalid_config(format!(
+                "--header cannot set HTTP hop-by-hop header {name}"
+            )));
+        }
         let value = HeaderValue::from_str(value.trim()).map_err(|error| {
             AppError::invalid_config(format!("invalid header value for {name}: {error}"))
         })?;
         headers.push((name, value));
     }
     Ok(headers)
+}
+
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "upgrade"
+    )
 }
 
 fn parse_header_names(raw_names: &[String]) -> Result<Vec<HeaderName>> {
@@ -520,13 +614,18 @@ fn default_host_header(url: &Url, override_host: Option<&str>) -> Result<String>
     }
 
     let host = url
-        .host_str()
+        .host()
         .ok_or_else(|| AppError::invalid_config(format!("URL {} does not contain a host", url)))?;
     let port = url.port();
     let default = match url.scheme() {
         "http" => Some(80),
         "https" => Some(443),
         _ => None,
+    };
+    let host = match host {
+        Host::Domain(host) => host.to_string(),
+        Host::Ipv4(host) => host.to_string(),
+        Host::Ipv6(host) => format!("[{host}]"),
     };
 
     let header = match port {
@@ -535,6 +634,27 @@ fn default_host_header(url: &Url, override_host: Option<&str>) -> Result<String>
     };
     validate_host_header(&header)?;
     Ok(header)
+}
+
+fn connect_uri_for_url(url: &Url) -> Result<Uri> {
+    url.as_str().parse::<Uri>().map_err(|error| {
+        AppError::invalid_config(format!("invalid HTTP connection URI {}: {error}", url))
+    })
+}
+
+fn request_uri_for_url(url: &Url, override_authority: Option<&str>) -> Result<String> {
+    let Some(authority) = override_authority else {
+        return Ok(url.as_str().to_string());
+    };
+
+    let path_and_query = &url[Position::BeforePath..];
+    Uri::builder()
+        .scheme(url.scheme())
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .map(|uri| uri.to_string())
+        .map_err(|error| AppError::invalid_config(format!("invalid HTTP request URI: {error}")))
 }
 
 fn explicit_host_header(raw: &str) -> Result<String> {
@@ -565,7 +685,11 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
 
     let mut ranges = Vec::with_capacity(raw_ranges.len());
     for raw in raw_ranges {
-        let range = if let Some((start, end)) = raw.split_once('-') {
+        let trimmed = raw.trim();
+        let range = if let Some((start, end)) = trimmed.split_once('-')
+            && !start.trim().is_empty()
+            && !end.trim().is_empty()
+        {
             let start = parse_status_code(start.trim())?;
             let end = parse_status_code(end.trim())?;
             if start > end {
@@ -576,7 +700,7 @@ fn parse_status_ranges(raw_ranges: &[String]) -> Result<StatusRanges> {
             }
             StatusRange { start, end }
         } else {
-            let code = parse_status_code(raw.trim())?;
+            let code = parse_status_code(trimmed)?;
             StatusRange {
                 start: code,
                 end: code,
@@ -723,23 +847,16 @@ fn assert_response_headers(
 struct BufferedBody {
     bytes: Vec<u8>,
     truncated: bool,
+    exact_match_impossible: bool,
 }
 
 fn has_body_assertions(args: &HttpArgs) -> bool {
     args.body_equals.is_some() || !args.contains.is_empty() || !args.not_contains.is_empty()
 }
 
-fn early_body_contains_assertions(args: &HttpArgs) -> &[String] {
-    if args.body_equals.is_none() && args.not_contains.is_empty() {
-        &args.contains
-    } else {
-        &[]
-    }
-}
-
 fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> Result<()> {
     if let Some(expected) = &args.body_equals {
-        if body.bytes != expected.as_bytes() {
+        if body.exact_match_impossible || body.bytes != expected.as_bytes() {
             if body.truncated && expected.as_bytes().starts_with(&body.bytes) {
                 return Err(AppError::failure(format!(
                     "response body from {} was truncated at {} bytes, cannot prove exact body match",
@@ -784,9 +901,10 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
     }
 
     if body.truncated && !args.not_contains.is_empty() {
-        return Err(AppError::failure(
-            "response body was truncated, cannot prove negative body assertions",
-        ));
+        return Err(AppError::failure(format!(
+            "response body from {} was truncated at {} bytes, cannot prove negative body assertions",
+            target, args.max_body
+        )));
     }
 
     Ok(())
@@ -795,12 +913,29 @@ fn assert_response_body(body: &BufferedBody, args: &HttpArgs, target: &str) -> R
 async fn read_body(
     mut body: hyper::body::Incoming,
     limit: usize,
-    early_contains: &[String],
+    args: &HttpArgs,
 ) -> Result<BufferedBody> {
     let mut bytes = Vec::new();
     let mut truncated = false;
+    let mut contains_matcher = TextMatcher::new(&args.contains);
+    let mut not_contains_matcher = TextMatcher::new(&args.not_contains);
     let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
-    let body_size_upper = body.size_hint().upper();
+    let body_size_hint = body.size_hint();
+    let mut exact_match_impossible = args.body_equals.as_ref().is_some_and(|expected| {
+        let expected_len = u64::try_from(expected.len()).unwrap_or(u64::MAX);
+        body_size_hint
+            .exact()
+            .is_some_and(|body_len| body_len != expected_len)
+    });
+    if exact_match_impossible {
+        return Ok(BufferedBody {
+            bytes,
+            truncated,
+            exact_match_impossible,
+        });
+    }
+
+    let body_size_upper = body_size_hint.upper();
     let declared_body_exceeds_limit = body_size_upper.is_some_and(|upper| upper > limit_u64);
     let body_may_exceed_limit = body_size_upper.is_none_or(|upper| upper > limit_u64);
 
@@ -808,6 +943,7 @@ async fn read_body(
         let frame = frame
             .map_err(|error| AppError::failure(format!("failed reading HTTP body: {error}")))?;
         if let Some(data) = frame.data_ref() {
+            let previous_len = bytes.len();
             if bytes.len() < limit {
                 let remaining = limit - bytes.len();
                 if data.len() > remaining {
@@ -819,7 +955,23 @@ async fn read_body(
                 truncated = true;
             }
 
-            if !early_contains.is_empty() && contains_all(&bytes, early_contains) {
+            if let Some(expected) = &args.body_equals {
+                let expected = expected.as_bytes();
+                let appended = &bytes[previous_len..];
+                let expected_appended = expected.get(previous_len..bytes.len());
+                if expected_appended != Some(appended) {
+                    exact_match_impossible = true;
+                }
+            }
+            contains_matcher.observe_appended(&bytes, previous_len);
+            not_contains_matcher.observe_appended(&bytes, previous_len);
+
+            if body_assertion_is_decided(
+                exact_match_impossible,
+                &contains_matcher,
+                &not_contains_matcher,
+                args,
+            ) {
                 break;
             }
 
@@ -837,7 +989,31 @@ async fn read_body(
         }
     }
 
-    Ok(BufferedBody { bytes, truncated })
+    Ok(BufferedBody {
+        bytes,
+        truncated,
+        exact_match_impossible,
+    })
+}
+
+fn body_assertion_is_decided(
+    exact_match_impossible: bool,
+    contains_matcher: &TextMatcher,
+    not_contains_matcher: &TextMatcher,
+    args: &HttpArgs,
+) -> bool {
+    if args.body_equals.is_some() && exact_match_impossible {
+        return true;
+    }
+
+    if !args.not_contains.is_empty() && not_contains_matcher.any_matched() {
+        return true;
+    }
+
+    args.body_equals.is_none()
+        && args.not_contains.is_empty()
+        && !args.contains.is_empty()
+        && contains_matcher.all_matched()
 }
 
 enum BodyLimitWait {
@@ -869,15 +1045,6 @@ async fn wait_for_body_eof_after_limit(body: &mut Incoming) -> Result<BodyLimitW
     }
 }
 
-fn contains_all(bytes: &[u8], needles: &[String]) -> bool {
-    needles.iter().all(|needle| contains_bytes(bytes, needle))
-}
-
-fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
-}
-
 #[cfg(test)]
 mod tests {
     use super::default_host_header;
@@ -888,5 +1055,12 @@ mod tests {
         let url = Url::parse("http://[::1]:8080/healthz").unwrap();
 
         assert_eq!(default_host_header(&url, None).unwrap(), "[::1]:8080");
+    }
+
+    #[test]
+    fn default_host_header_brackets_ipv6_without_explicit_port() {
+        let url = Url::parse("http://[::1]/healthz").unwrap();
+
+        assert_eq!(default_host_header(&url, None).unwrap(), "[::1]");
     }
 }

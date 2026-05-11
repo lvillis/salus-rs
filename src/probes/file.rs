@@ -6,7 +6,8 @@ use crate::{
     cli::FileArgs,
     diagnostic,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport},
+    probe::{MAX_CAPTURE_BYTES, ProbeOptions, ProbeReport},
+    text_match::{TextMatcher, contains_bytes},
 };
 
 pub async fn run(
@@ -48,9 +49,18 @@ async fn run_inner(
             "--max-read must be greater than 0 when file content assertions are used",
         ));
     }
+    if args.max_read > MAX_CAPTURE_BYTES && !args.contains.is_empty() {
+        return Err(AppError::invalid_config(format!(
+            "--max-read must be at most {MAX_CAPTURE_BYTES} bytes when file content assertions are used"
+        )));
+    }
 
     if args.contains.iter().any(String::is_empty) {
         return Err(AppError::invalid_config("--contains must not be empty"));
+    }
+
+    if args.max_age.is_some_and(|max_age| max_age.is_zero()) {
+        return Err(AppError::invalid_config("--max-age must be greater than 0"));
     }
 
     let metadata = tokio::fs::metadata(&args.path)
@@ -132,7 +142,7 @@ async fn run_inner(
 
     Ok(ProbeReport::new(
         "file",
-        args.path.display().to_string(),
+        diagnostic::path_field(&args.path),
         Some(format!("size={}B", metadata.len())),
         started,
         options,
@@ -152,6 +162,7 @@ async fn read_file(
 ) -> Result<BufferedFile> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
+    let mut matcher = TextMatcher::new(required_texts);
     let mut truncated = false;
 
     loop {
@@ -165,6 +176,7 @@ async fn read_file(
             break;
         }
 
+        let previous_len = bytes.len();
         if bytes.len() < limit {
             let remaining = limit - bytes.len();
             if read > remaining {
@@ -175,22 +187,12 @@ async fn read_file(
         } else {
             truncated = true;
         }
+        matcher.observe_appended(&bytes, previous_len);
 
-        if (!required_texts.is_empty() && contains_all(&bytes, required_texts)) || truncated {
+        if (!required_texts.is_empty() && matcher.all_matched()) || truncated {
             break;
         }
     }
 
     Ok(BufferedFile { bytes, truncated })
-}
-
-fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
-    required_texts
-        .iter()
-        .all(|needle| contains_bytes(bytes, needle))
-}
-
-fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
 }

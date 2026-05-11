@@ -186,12 +186,13 @@ pub struct HttpArgs {
         default_value_t = 65_536,
         value_name = "BYTES",
         help_heading = "Limits",
-        help = "Maximum response body bytes to read"
+        help = "Maximum response body bytes to read for body assertions, up to 16 MiB"
     )]
     pub max_body: usize,
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ENV_EXPANSION_AFTER_HELP)]
 pub struct TcpArgs {
     #[arg(
         long = "addr",
@@ -203,6 +204,7 @@ pub struct TcpArgs {
 
 #[cfg(feature = "grpc")]
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ENV_EXPANSION_AFTER_HELP)]
 pub struct GrpcArgs {
     #[arg(long = "addr", value_name = "HOST:PORT", help = "gRPC server address")]
     pub addr: String,
@@ -221,6 +223,7 @@ pub struct GrpcArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ENV_EXPANSION_AFTER_HELP)]
 pub struct ExecArgs {
     #[arg(
         long = "exit-code",
@@ -251,7 +254,7 @@ pub struct ExecArgs {
         default_value_t = 65_536,
         value_name = "BYTES",
         help_heading = "Limits",
-        help = "Maximum stdout and stderr bytes to keep"
+        help = "Maximum stdout and stderr bytes to keep for output assertions, up to 16 MiB"
     )]
     pub max_output: usize,
     #[arg(
@@ -264,6 +267,7 @@ pub struct ExecArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+#[command(after_help = ENV_EXPANSION_AFTER_HELP)]
 pub struct FileArgs {
     #[arg(long, value_name = "PATH", help = "File path to inspect")]
     pub path: PathBuf,
@@ -301,7 +305,7 @@ pub struct FileArgs {
         long = "max-read",
         default_value_t = 65_536,
         value_name = "BYTES",
-        help = "Maximum file bytes to read for content assertions"
+        help = "Maximum file bytes to read for content assertions, up to 16 MiB"
     )]
     pub max_read: usize,
 }

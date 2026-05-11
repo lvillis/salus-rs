@@ -1,7 +1,7 @@
 use std::{borrow::Cow, ffi::OsStr, path::Path};
 
 pub fn value(raw: &str) -> Cow<'_, str> {
-    if contains_control(raw) {
+    if raw.is_empty() || raw.trim() != raw || contains_control(raw) {
         Cow::Owned(format!("{raw:?}"))
     } else {
         Cow::Borrowed(raw)
@@ -10,14 +10,21 @@ pub fn value(raw: &str) -> Cow<'_, str> {
 
 pub fn os_str(raw: &OsStr) -> String {
     match raw.to_str() {
-        Some(value) if !contains_control(value) => value.to_string(),
+        Some(raw) => value(raw).into_owned(),
         _ => format!("{raw:?}"),
     }
 }
 
 pub fn path(path: &Path) -> String {
     match path.to_str() {
-        Some(value) if !contains_control(value) => value.to_string(),
+        Some(raw) => value(raw).into_owned(),
+        _ => format!("{path:?}"),
+    }
+}
+
+pub fn path_field(path: &Path) -> String {
+    match path.to_str() {
+        Some(raw) => raw.to_string(),
         _ => format!("{path:?}"),
     }
 }
@@ -30,7 +37,7 @@ fn contains_control(raw: &str) -> bool {
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use super::{os_str, path, value};
+    use super::{os_str, path, path_field, value};
 
     #[test]
     fn value_preserves_plain_text() {
@@ -43,6 +50,16 @@ mod tests {
     }
 
     #[test]
+    fn value_quotes_empty_text() {
+        assert_eq!(value(""), "\"\"");
+    }
+
+    #[test]
+    fn value_quotes_surrounding_whitespace() {
+        assert_eq!(value(" bad "), "\" bad \"");
+    }
+
+    #[test]
     fn path_escapes_control_characters() {
         assert_eq!(path(Path::new("/tmp/bad\npath")), "\"/tmp/bad\\npath\"");
     }
@@ -50,6 +67,21 @@ mod tests {
     #[test]
     fn os_str_escapes_control_characters() {
         assert_eq!(os_str(OsStr::new("bad\ncmd")), "\"bad\\ncmd\"");
+    }
+
+    #[test]
+    fn os_str_quotes_surrounding_whitespace() {
+        assert_eq!(os_str(OsStr::new(" cmd ")), "\" cmd \"");
+    }
+
+    #[test]
+    fn path_quotes_surrounding_whitespace() {
+        assert_eq!(path(Path::new("/tmp/ready ")), "\"/tmp/ready \"");
+    }
+
+    #[test]
+    fn path_field_preserves_utf8_without_prequoting() {
+        assert_eq!(path_field(Path::new("/tmp/ready path")), "/tmp/ready path");
     }
 
     #[cfg(unix)]
@@ -70,5 +102,15 @@ mod tests {
         let raw = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
 
         assert_eq!(path(&raw), "\"/tmp/\\xFF\"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_field_escapes_non_utf8_bytes() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+
+        let raw = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+
+        assert_eq!(path_field(&raw), "\"/tmp/\\xFF\"");
     }
 }

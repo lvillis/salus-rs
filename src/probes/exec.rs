@@ -1,4 +1,8 @@
-use std::{process::Stdio, time::Duration};
+use std::{
+    process::Stdio,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
 
 #[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -13,11 +17,13 @@ use crate::{
     cli::ExecArgs,
     diagnostic,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport, deadline_after},
+    probe::{MAX_CAPTURE_BYTES, ProbeOptions, ProbeReport, deadline_after},
+    text_match::{TextMatcher, contains_bytes},
 };
 
 const OUTPUT_EOF_GRACE_AFTER_LIMIT: Duration = Duration::from_millis(50);
 const OUTPUT_IDLE_GRACE_AFTER_EXIT: Duration = Duration::from_millis(50);
+const OUTPUT_MAX_GRACE_AFTER_EXIT: Duration = Duration::from_millis(250);
 
 pub async fn run(
     options: ProbeOptions,
@@ -30,6 +36,13 @@ pub async fn run(
         return Err(AppError::invalid_config(
             "--max-output must be greater than 0 when output assertions are used",
         ));
+    }
+    if args.max_output > MAX_CAPTURE_BYTES
+        && (!args.stdout_contains.is_empty() || !args.stderr_contains.is_empty())
+    {
+        return Err(AppError::invalid_config(format!(
+            "--max-output must be at most {MAX_CAPTURE_BYTES} bytes when output assertions are used"
+        )));
     }
 
     validate_non_empty_assertions("--stdout-contains", &args.stdout_contains)?;
@@ -217,10 +230,38 @@ struct BufferedOutput {
 
 struct OutputCapture {
     task: OutputTask,
-    snapshot: watch::Receiver<BufferedOutput>,
+    progress: watch::Receiver<OutputProgress>,
+    state: Arc<Mutex<BufferedOutput>>,
 }
 
 type OutputTask = JoinHandle<Result<BufferedOutput>>;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OutputProgress {
+    truncated: bool,
+    matched: bool,
+    limit_reached: bool,
+}
+
+impl From<&BufferedOutput> for OutputProgress {
+    fn from(output: &BufferedOutput) -> Self {
+        Self {
+            truncated: output.truncated,
+            matched: output.matched,
+            limit_reached: output.limit_reached,
+        }
+    }
+}
+
+impl OutputCapture {
+    fn progress(&self) -> OutputProgress {
+        *self.progress.borrow()
+    }
+
+    fn snapshot(&self) -> Result<BufferedOutput> {
+        Ok(lock_output_state(self.state.as_ref())?.clone())
+    }
+}
 
 fn validate_non_empty_assertions(flag: &str, values: &[String]) -> Result<()> {
     if values.iter().any(String::is_empty) {
@@ -240,6 +281,9 @@ async fn await_output_task(
     let Some(capture) = capture else {
         return Ok(BufferedOutput::default());
     };
+    let output_deadline = tokio::time::Instant::now()
+        .checked_add(OUTPUT_MAX_GRACE_AFTER_EXIT)
+        .map_or(deadline, |grace_deadline| grace_deadline.min(deadline));
 
     loop {
         if capture.task.is_finished() {
@@ -248,17 +292,18 @@ async fn await_output_task(
             })?;
         }
 
-        if capture.snapshot.borrow().matched {
-            let snapshot = capture.snapshot.borrow().clone();
+        let progress = capture.progress();
+        if progress.matched {
+            let snapshot = capture.snapshot()?;
             capture.task.abort();
             return Ok(snapshot);
         }
-        if capture.snapshot.borrow().truncated {
-            let snapshot = capture.snapshot.borrow().clone();
+        if progress.truncated {
+            let snapshot = capture.snapshot()?;
             capture.task.abort();
             return Ok(snapshot);
         }
-        if capture.snapshot.borrow().limit_reached {
+        if progress.limit_reached {
             match wait_for_output_eof_after_limit(capture, deadline).await? {
                 LimitWait::Finished(output) => return Ok(output),
                 LimitWait::StillOpen(snapshot) => return Ok(snapshot),
@@ -266,7 +311,7 @@ async fn await_output_task(
             }
         }
 
-        match wait_for_output_idle_after_exit(capture, deadline).await? {
+        match wait_for_output_idle_after_exit(capture, output_deadline).await? {
             LimitWait::Finished(output) => return Ok(output),
             LimitWait::StillOpen(snapshot) => return Ok(snapshot),
             LimitWait::Changed => continue,
@@ -299,12 +344,11 @@ async fn wait_for_output_settle(
     deadline: tokio::time::Instant,
     max_grace: Duration,
 ) -> Result<LimitWait> {
-    let snapshot = capture.snapshot.borrow().clone();
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let grace = remaining.min(max_grace);
     if grace.is_zero() {
         capture.task.abort();
-        return Ok(LimitWait::StillOpen(snapshot));
+        return Ok(LimitWait::StillOpen(capture.snapshot()?));
     }
 
     let grace_sleep = tokio::time::sleep(grace);
@@ -316,13 +360,13 @@ async fn wait_for_output_settle(
                 .map_err(|error| AppError::internal(format!("output task failed: {error}")))??;
             Ok(LimitWait::Finished(output))
         }
-        changed = capture.snapshot.changed() => {
+        changed = capture.progress.changed() => {
             let _ = changed;
             Ok(LimitWait::Changed)
         }
         () = &mut grace_sleep => {
             capture.task.abort();
-            Ok(LimitWait::StillOpen(snapshot))
+            Ok(LimitWait::StillOpen(capture.snapshot()?))
         }
     }
 }
@@ -440,15 +484,21 @@ fn spawn_output_capture<R>(reader: R, limit: usize, required_texts: Vec<String>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let (snapshot_tx, snapshot) = watch::channel(BufferedOutput::default());
+    let state = Arc::new(Mutex::new(BufferedOutput::default()));
+    let (progress_tx, progress) = watch::channel(OutputProgress::default());
     let task = tokio::spawn(read_limited_with_snapshots(
         reader,
         limit,
         required_texts,
-        snapshot_tx,
+        Arc::clone(&state),
+        progress_tx,
     ));
 
-    OutputCapture { task, snapshot }
+    OutputCapture {
+        task,
+        progress,
+        state,
+    }
 }
 
 #[cfg(test)]
@@ -460,24 +510,23 @@ async fn read_limited<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let (snapshot_tx, _snapshot) = watch::channel(BufferedOutput::default());
-    read_limited_with_snapshots(reader, limit, required_texts, snapshot_tx).await
+    let state = Arc::new(Mutex::new(BufferedOutput::default()));
+    let (progress_tx, _progress) = watch::channel(OutputProgress::default());
+    read_limited_with_snapshots(reader, limit, required_texts, state, progress_tx).await
 }
 
 async fn read_limited_with_snapshots<R>(
     mut reader: R,
     limit: usize,
     required_texts: Vec<String>,
-    snapshots: watch::Sender<BufferedOutput>,
+    state: Arc<Mutex<BufferedOutput>>,
+    progress: watch::Sender<OutputProgress>,
 ) -> Result<BufferedOutput>
 where
     R: AsyncRead + Unpin,
 {
-    let mut collected = Vec::new();
     let mut buffer = [0_u8; 4096];
-    let mut truncated = false;
-    let mut matched = false;
-    let mut limit_reached = false;
+    let mut matcher = TextMatcher::new(&required_texts);
 
     loop {
         let read = reader
@@ -488,54 +537,49 @@ where
             break;
         }
 
-        if collected.len() < limit {
-            let remaining = limit - collected.len();
-            if read > remaining {
-                truncated = true;
-            }
-            let slice = &buffer[..read.min(remaining)];
-            collected.extend_from_slice(slice);
-        } else if read > 0 {
-            truncated = true;
-        }
+        let current = {
+            let mut output = lock_output_state(state.as_ref())?;
+            let previous_len = output.bytes.len();
 
-        matched = !required_texts.is_empty() && contains_all(&collected, &required_texts);
-        limit_reached = !required_texts.is_empty() && collected.len() == limit;
-        let _ = snapshots.send(BufferedOutput {
-            bytes: collected.clone(),
-            truncated,
-            matched,
-            limit_reached,
-            complete: false,
-        });
+            if output.bytes.len() < limit {
+                let remaining = limit - output.bytes.len();
+                if read > remaining {
+                    output.truncated = true;
+                }
+                let slice = &buffer[..read.min(remaining)];
+                output.bytes.extend_from_slice(slice);
+            } else {
+                output.truncated = true;
+            }
+
+            matcher.observe_appended(&output.bytes, previous_len);
+            output.matched = !required_texts.is_empty() && matcher.all_matched();
+            output.limit_reached = !required_texts.is_empty() && output.bytes.len() == limit;
+            output.complete = false;
+            OutputProgress::from(&*output)
+        };
+        let _ = progress.send(current);
     }
 
-    let output = BufferedOutput {
-        bytes: collected,
-        truncated,
-        matched,
-        limit_reached,
-        complete: true,
+    let output = {
+        let mut output = lock_output_state(state.as_ref())?;
+        output.complete = true;
+        output.clone()
     };
-    let _ = snapshots.send(output.clone());
+    let _ = progress.send(OutputProgress::from(&output));
     Ok(output)
+}
+
+fn lock_output_state(state: &Mutex<BufferedOutput>) -> Result<MutexGuard<'_, BufferedOutput>> {
+    state
+        .lock()
+        .map_err(|_| AppError::internal("output capture state lock was poisoned"))
 }
 
 impl BufferedOutput {
     fn cannot_prove_absence(&self) -> bool {
         self.truncated || (self.limit_reached && !self.complete)
     }
-}
-
-fn contains_all(bytes: &[u8], required_texts: &[String]) -> bool {
-    required_texts
-        .iter()
-        .all(|required| contains_bytes(bytes, required))
-}
-
-fn contains_bytes(bytes: &[u8], needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    needle.is_empty() || bytes.windows(needle.len()).any(|window| window == needle)
 }
 
 #[cfg(unix)]
@@ -555,10 +599,17 @@ fn termination_suffix(_status: &std::process::ExitStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use super::{read_limited, spawn_output_capture};
+    use super::{
+        BufferedOutput, LimitWait, OutputCapture, OutputProgress, await_output_task, read_limited,
+        spawn_output_capture, wait_for_output_settle,
+    };
     use tokio::io::AsyncWriteExt;
+    use tokio::sync::watch;
 
     #[tokio::test]
     async fn read_limited_marks_truncated_output() {
@@ -596,16 +647,78 @@ mod tests {
         let mut capture = spawn_output_capture(reader, 65_536, vec!["ok".to_string()]);
         writer.write_all(b"ok").await.unwrap();
 
-        tokio::time::timeout(Duration::from_millis(100), capture.snapshot.changed())
+        tokio::time::timeout(Duration::from_millis(100), capture.progress.changed())
             .await
             .unwrap()
             .unwrap();
-        let output = capture.snapshot.borrow().clone();
+        let output = capture.snapshot().unwrap();
         capture.task.abort();
 
         assert_eq!(output.bytes, b"ok");
         assert!(!output.truncated);
         assert!(output.matched);
         assert!(!output.complete);
+    }
+
+    #[tokio::test]
+    async fn output_capture_waits_while_output_is_progressing_after_exit() {
+        let (mut writer, reader) = tokio::io::duplex(16);
+        let mut capture = Some(spawn_output_capture(
+            reader,
+            65_536,
+            vec!["ready".to_string()],
+        ));
+
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"rea").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            writer.write_all(b"d").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            writer.write_all(b"y").await.unwrap();
+        });
+
+        let output = await_output_task(
+            &mut capture,
+            "stdout",
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        writer_task.await.unwrap();
+        assert_eq!(output.bytes, b"ready");
+        assert!(output.matched);
+    }
+
+    #[tokio::test]
+    async fn output_settle_timeout_returns_latest_snapshot() {
+        let state = Arc::new(Mutex::new(BufferedOutput::default()));
+        let (_progress_tx, progress) = watch::channel(OutputProgress::default());
+        let task = tokio::spawn(std::future::pending());
+        let mut capture = OutputCapture {
+            task,
+            progress,
+            state: Arc::clone(&state),
+        };
+
+        let updater = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut output = state.lock().unwrap();
+            output.bytes = b"latest".to_vec();
+        });
+
+        let settled = wait_for_output_settle(
+            &mut capture,
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(30),
+        )
+        .await
+        .unwrap();
+
+        updater.await.unwrap();
+        match settled {
+            LimitWait::StillOpen(output) => assert_eq!(output.bytes, b"latest"),
+            _ => panic!("expected output capture to remain open"),
+        }
     }
 }

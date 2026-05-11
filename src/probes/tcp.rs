@@ -99,7 +99,7 @@ fn validate_tcp_addr(raw: &str) -> Result<()> {
 }
 
 fn per_attempt_timeout(remaining: Duration, attempts_left: usize) -> Duration {
-    let attempts_left = attempts_left.max(1) as u32;
+    let attempts_left = u32::try_from(attempts_left.max(1)).unwrap_or(u32::MAX);
     remaining
         .checked_div(attempts_left)
         .unwrap_or(Duration::from_millis(1))
@@ -132,6 +132,17 @@ mod tests {
     fn per_attempt_timeout_keeps_a_minimum_of_one_millisecond() {
         assert_eq!(
             per_attempt_timeout(Duration::from_nanos(1), 8),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn per_attempt_timeout_saturates_extremely_large_attempt_counts() {
+        let attempts = u32::MAX as usize + 2;
+
+        assert_eq!(
+            per_attempt_timeout(Duration::from_secs(1), attempts),
             Duration::from_millis(1)
         );
     }

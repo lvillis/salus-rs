@@ -19,7 +19,7 @@ use crate::{
     diagnostic,
     error::{AppError, Result},
     probe::{ProbeOptions, ProbeReport},
-    tls::{build_http_tls_config, parse_server_name_override},
+    tls::{build_http_tls_config, parse_server_name_override, validate_tls_options},
 };
 
 pub async fn run(
@@ -27,6 +27,12 @@ pub async fn run(
     args: &GrpcArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
+    if args.addr.is_empty() {
+        return Err(AppError::invalid_config("--addr must not be empty"));
+    }
+    if args.authority.as_deref().is_some_and(str::is_empty) {
+        return Err(AppError::invalid_config("--authority must not be empty"));
+    }
     if !args.tls && has_tls_flags(args) {
         return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
     }
@@ -36,13 +42,21 @@ pub async fn run(
         PortPolicy::Required,
         RawFormat::Debug,
     )?;
+    if let Some(authority) = &args.authority {
+        validate_authority(
+            authority,
+            "gRPC authority",
+            PortPolicy::Optional,
+            RawFormat::Debug,
+        )?;
+    }
+    if args.tls {
+        validate_tls_options(&args.tls_args)?;
+    }
 
     let endpoint_uri = format!("http://{}", args.addr);
     let request_scheme = if args.tls { "https" } else { "http" };
-    let target = match &args.service {
-        Some(service) if !service.is_empty() => format!("{} service={service}", args.addr),
-        _ => args.addr.clone(),
-    };
+    let target = grpc_target(&args.addr, args.service.as_deref());
 
     let timeout = options.timeout;
     let result = tokio::time::timeout(timeout, async {
@@ -52,12 +66,6 @@ pub async fn run(
         endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
 
         if let Some(authority) = &args.authority {
-            validate_authority(
-                authority,
-                "gRPC authority",
-                PortPolicy::Optional,
-                RawFormat::Debug,
-            )?;
             let origin = format!("{request_scheme}://{authority}")
                 .parse()
                 .map_err(|error| {
@@ -111,19 +119,17 @@ pub async fn run(
                 service: args.service.clone().unwrap_or_default(),
             })
             .await
-            .map_err(|status| grpc_status_error(&args.addr, &status))?;
+            .map_err(|status| grpc_status_error(&target, &status))?;
 
         let status = ServingStatus::try_from(response.get_ref().status).map_err(|_| {
             AppError::failure(format!(
-                "gRPC health check for {} returned an unknown serving status",
-                args.addr
+                "gRPC health check for {target} returned an unknown serving status"
             ))
         })?;
 
         if status != ServingStatus::Serving {
             return Err(AppError::failure(format!(
-                "gRPC health check for {} returned {status:?}",
-                args.addr
+                "gRPC health check for {target} returned {status:?}"
             )));
         }
 
@@ -146,10 +152,17 @@ pub async fn run(
     }
 }
 
-fn grpc_status_error(addr: &str, status: &tonic::Status) -> AppError {
+fn grpc_target(addr: &str, service: Option<&str>) -> String {
+    match service {
+        Some(service) if !service.is_empty() => format!("{addr} service={service:?}"),
+        _ => addr.to_string(),
+    }
+}
+
+fn grpc_status_error(target: &str, status: &tonic::Status) -> AppError {
     AppError::failure(format!(
-        "gRPC health check for {} failed: code={} message={}",
-        diagnostic::value(addr),
+        "gRPC health check for {} failed: code={:?} message={}",
+        diagnostic::value(target),
         status.code(),
         diagnostic::value(status.message())
     ))
@@ -212,7 +225,7 @@ where
 mod tests {
     use tonic::Code;
 
-    use super::grpc_status_error;
+    use super::{grpc_status_error, grpc_target};
 
     #[test]
     fn grpc_status_error_escapes_server_message_controls() {
@@ -220,6 +233,20 @@ mod tests {
 
         let error = grpc_status_error("127.0.0.1:50051", &status);
 
+        assert!(error.to_string().contains("code=Unavailable"));
         assert!(error.to_string().contains(r#"message="not ready\nnext""#));
+    }
+
+    #[test]
+    fn grpc_target_includes_service_name() {
+        assert_eq!(
+            grpc_target("127.0.0.1:50051", Some("db")),
+            "127.0.0.1:50051 service=\"db\""
+        );
+    }
+
+    #[test]
+    fn grpc_target_omits_empty_service_name() {
+        assert_eq!(grpc_target("127.0.0.1:50051", Some("")), "127.0.0.1:50051");
     }
 }

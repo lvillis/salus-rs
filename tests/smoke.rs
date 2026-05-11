@@ -35,6 +35,10 @@ use tonic_health::ServingStatus;
 const TLS_CERT_PEM: &str = include_str!("fixtures/server.pem");
 const TLS_KEY_PEM: &str = include_str!("fixtures/server.rsa");
 const TLS_CERT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/server.pem");
+const EXCESSIVE_CAPTURE_LIMIT: &str = "16777217";
+#[cfg(feature = "grpc")]
+// gRPC frame for grpc.health.v1.HealthCheckResponse { status: SERVING }.
+const GRPC_HEALTH_SERVING_FRAME: &[u8] = &[0, 0, 0, 0, 2, 8, 1];
 
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
@@ -245,6 +249,72 @@ async fn http_probe_succeeds_after_required_body_before_stream_closes() {
 }
 
 #[tokio::test]
+async fn http_probe_exact_body_mismatch_does_not_wait_for_open_stream() {
+    let addr = spawn_http_open_body_server("HTTP/1.1 200 OK\r\n\r\nno").await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "http",
+            "--url",
+            &format!("http://{addr}/healthz"),
+            "--body-equals",
+            "ready",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[tokio::test]
+async fn http_probe_exact_body_length_mismatch_does_not_wait_for_open_stream() {
+    let addr = spawn_http_open_body_server("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n").await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "http",
+            "--url",
+            &format!("http://{addr}/healthz"),
+            "--body-equals",
+            "",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[tokio::test]
+async fn http_probe_forbidden_body_text_does_not_wait_for_open_stream() {
+    let addr = spawn_http_open_body_server("HTTP/1.1 200 OK\r\n\r\nbad").await;
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "http",
+            "--url",
+            &format!("http://{addr}/healthz"),
+            "--not-contains",
+            "bad",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[tokio::test]
 async fn http_probe_sends_header() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -334,6 +404,36 @@ async fn http_probe_rejects_framing_request_header() {
         "http://127.0.0.1:9/healthz",
         "--header",
         "Content-Length:1",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_hop_by_hop_request_header() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--header",
+        "Connection: close",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_proxy_connection_request_header() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--header",
+        "Proxy-Connection: keep-alive",
     ]))
     .await;
 
@@ -558,6 +658,13 @@ async fn http_probe_rejects_url_with_backslash() {
 #[tokio::test]
 async fn http_probe_rejects_url_with_invalid_percent_encoding() {
     let code = salus::main_entry(args(&["salus", "http", "--url", "http://127.0.0.1:9/%zz"])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn http_probe_rejects_empty_url() {
+    let code = salus::main_entry(args(&["salus", "http", "--url", ""])).await;
 
     assert_eq!(code, 3);
 }
@@ -950,7 +1057,58 @@ async fn https_probe_succeeds_with_insecure_skip_verify() {
 }
 
 #[tokio::test]
-async fn https_probe_fails_without_trust_override_for_self_signed_server() {
+async fn https_probe_rejects_conflicting_trust_controls() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "https://127.0.0.1:9/healthz",
+        "--ca",
+        TLS_CERT_PATH,
+        "--insecure-skip-verify",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn https_probe_rejects_empty_ca_file() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "https://127.0.0.1:9/healthz",
+        "--ca",
+        "",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn https_probe_rejects_non_regular_ca_file() {
+    let path = temp_file_path("salus-tls-ca-dir");
+    fs::create_dir(&path).unwrap();
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "https://127.0.0.1:9/healthz",
+        "--ca",
+        &path.display().to_string(),
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+
+    let _ = fs::remove_dir(path);
+}
+
+#[tokio::test]
+async fn https_probe_fails_without_trust_override() {
     let addr = spawn_https_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
 
     let code = salus::main_entry(args(&[
@@ -961,7 +1119,11 @@ async fn https_probe_fails_without_trust_override_for_self_signed_server() {
     ]))
     .await;
 
-    assert_eq!(code, 1);
+    if cfg!(feature = "webpki") {
+        assert_eq!(code, 1);
+    } else {
+        assert_eq!(code, 3);
+    }
 }
 
 #[tokio::test]
@@ -1000,6 +1162,29 @@ async fn https_probe_succeeds_over_http2() {
         "ok",
         "--header-contains",
         "x-salus-protocol:h2",
+    ]))
+    .await;
+
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn https_http2_probe_uses_host_override_as_authority() {
+    let addr = spawn_https_http2_authority_server("example.test").await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        &format!("https://{addr}/healthz"),
+        "--ca",
+        TLS_CERT_PATH,
+        "--server-name",
+        "localhost",
+        "--host",
+        "example.test",
+        "--contains",
+        "ok",
     ]))
     .await;
 
@@ -1160,6 +1345,23 @@ async fn http_probe_rejects_zero_body_limit_with_body_assertion() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_excessive_body_limit_with_body_assertion() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:1/healthz",
+        "--max-body",
+        EXCESSIVE_CAPTURE_LIMIT,
+        "--contains",
+        "ok",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_rejects_empty_body_contains_assertion() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -1288,6 +1490,43 @@ async fn file_probe_rejects_zero_read_limit_when_content_must_be_read() {
 }
 
 #[tokio::test]
+async fn file_probe_rejects_excessive_read_limit_when_content_must_be_read() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "file",
+        "--path",
+        "/does/not/matter",
+        "--contains",
+        "ready",
+        "--max-read",
+        EXCESSIVE_CAPTURE_LIMIT,
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn file_probe_rejects_zero_max_age() {
+    let path = temp_file_path("salus-file-zero-max-age");
+    fs::write(&path, b"ready\n").unwrap();
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "file",
+        "--path",
+        &path.display().to_string(),
+        "--max-age",
+        "0s",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+
+    let _ = fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn file_probe_rejects_empty_contains_assertion() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -1400,6 +1639,25 @@ async fn exec_probe_rejects_zero_output_limit_with_output_assertion() {
         "ok",
         "--max-output",
         "0",
+        "--",
+        "sh",
+        "-c",
+        "printf ok",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn exec_probe_rejects_excessive_output_limit_with_output_assertion() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "exec",
+        "--stdout-contains",
+        "ok",
+        "--max-output",
+        EXCESSIVE_CAPTURE_LIMIT,
         "--",
         "sh",
         "-c",
@@ -1556,6 +1814,29 @@ async fn exec_probe_missing_required_output_does_not_wait_for_daemonized_pipe() 
             "sh",
             "-c",
             "printf no; setsid sh -c 'sleep 1' &",
+        ])),
+    )
+    .await;
+
+    assert_eq!(result, Ok(1));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_probe_missing_required_output_does_not_wait_for_active_daemonized_pipe() {
+    let result = tokio::time::timeout(
+        Duration::from_millis(750),
+        salus::main_entry(args(&[
+            "salus",
+            "--timeout",
+            "5s",
+            "exec",
+            "--stdout-contains",
+            "ready",
+            "--",
+            "sh",
+            "-c",
+            "printf no; setsid sh -c 'i=0; while [ \"$i\" -lt 100 ]; do printf x; i=$((i + 1)); sleep 0.02; done' &",
         ])),
     )
     .await;
@@ -1746,6 +2027,24 @@ async fn grpc_probe_succeeds() {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
+async fn grpc_probe_uses_authority_override() {
+    let addr = spawn_grpc_authority_server("example.test").await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        &addr.to_string(),
+        "--authority",
+        "example.test",
+    ]))
+    .await;
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
 async fn grpc_probe_fails_when_service_is_not_serving() {
     let addr =
         spawn_grpc_server_with_service_status(false, Some(("db", ServingStatus::NotServing))).await;
@@ -1791,6 +2090,22 @@ async fn grpc_probe_rejects_invalid_authority() {
         "127.0.0.1:9",
         "--authority",
         "example.com:bad",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_probe_rejects_empty_authority() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        "127.0.0.1:9",
+        "--authority",
+        "",
     ]))
     .await;
 
@@ -1877,6 +2192,14 @@ async fn grpc_probe_rejects_invalid_address() {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
+async fn grpc_probe_rejects_empty_address() {
+    let code = salus::main_entry(args(&["salus", "grpc", "--addr", ""])).await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
 async fn grpc_probe_rejects_address_without_hostname() {
     let code = salus::main_entry(args(&["salus", "grpc", "--addr", ":50051"])).await;
 
@@ -1938,7 +2261,30 @@ async fn grpc_probe_succeeds_with_tls_ca_file_and_server_name_override() {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
-async fn grpc_probe_fails_with_tls_without_trust_override_for_self_signed_server() {
+async fn grpc_tls_probe_uses_authority_override() {
+    let addr = spawn_grpc_tls_authority_server("example.test").await;
+
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        &addr.to_string(),
+        "--tls",
+        "--ca",
+        TLS_CERT_PATH,
+        "--server-name",
+        "localhost",
+        "--authority",
+        "example.test",
+    ]))
+    .await;
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_probe_fails_with_tls_without_trust_override() {
     let addr = spawn_grpc_server(true).await;
 
     let code = salus::main_entry(args(&[
@@ -1950,7 +2296,11 @@ async fn grpc_probe_fails_with_tls_without_trust_override_for_self_signed_server
     ]))
     .await;
 
-    assert_eq!(code, 1);
+    if cfg!(feature = "webpki") {
+        assert_eq!(code, 1);
+    } else {
+        assert_eq!(code, 3);
+    }
 }
 
 #[cfg(feature = "grpc")]
@@ -1995,6 +2345,78 @@ async fn grpc_probe_succeeds_with_tls_and_insecure_skip_verify() {
 #[cfg(feature = "grpc")]
 async fn spawn_grpc_server(tls: bool) -> SocketAddr {
     spawn_grpc_server_with_service_status(tls, None).await
+}
+
+#[cfg(feature = "grpc")]
+async fn spawn_grpc_authority_server(expected_authority: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let io = TokioIo::new(stream);
+        let service = service_fn(move |request: Request<Incoming>| async move {
+            let authority = request.uri().authority().map(|value| value.as_str());
+            let status = if authority == Some(expected_authority) {
+                200
+            } else {
+                421
+            };
+
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/grpc")
+                    .header("grpc-status", "0")
+                    .body(Full::new(Bytes::from_static(GRPC_HEALTH_SERVING_FRAME)))
+                    .unwrap(),
+            )
+        });
+
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(io, service)
+            .await
+            .unwrap();
+    });
+
+    addr
+}
+
+#[cfg(feature = "grpc")]
+async fn spawn_grpc_tls_authority_server(expected_authority: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(tls_http2_server_config()));
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = acceptor.accept(stream).await.unwrap();
+        let io = TokioIo::new(stream);
+        let service = service_fn(move |request: Request<Incoming>| async move {
+            let authority = request.uri().authority().map(|value| value.as_str());
+            let status = if authority == Some(expected_authority) {
+                200
+            } else {
+                421
+            };
+
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/grpc")
+                    .header("grpc-status", "0")
+                    .body(Full::new(Bytes::from_static(GRPC_HEALTH_SERVING_FRAME)))
+                    .unwrap(),
+            )
+        });
+
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(io, service)
+            .await
+            .unwrap();
+    });
+
+    addr
 }
 
 #[cfg(feature = "grpc")]
@@ -2131,6 +2553,40 @@ async fn spawn_https_http2_server() -> SocketAddr {
                 Response::builder()
                     .status(200)
                     .header("x-salus-protocol", "h2")
+                    .body(Full::new(Bytes::from_static(b"ok")))
+                    .unwrap(),
+            )
+        });
+
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(io, service)
+            .await
+            .unwrap();
+    });
+
+    addr
+}
+
+async fn spawn_https_http2_authority_server(expected_authority: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(tls_http2_server_config()));
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = acceptor.accept(stream).await.unwrap();
+        let io = TokioIo::new(stream);
+        let service = service_fn(move |request: Request<Incoming>| async move {
+            let authority = request.uri().authority().map(|value| value.as_str());
+            let status = if authority == Some(expected_authority) {
+                200
+            } else {
+                421
+            };
+
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
                     .body(Full::new(Bytes::from_static(b"ok")))
                     .unwrap(),
             )

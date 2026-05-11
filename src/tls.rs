@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, path::Path, sync::Arc};
+use std::{fs::File, io::BufReader, net::Ipv6Addr, path::Path, sync::Arc};
 
 use rustls::{
     ClientConfig, RootCertStore,
@@ -18,15 +18,102 @@ pub fn build_http_tls_config(tls: &TlsArgs) -> Result<ClientConfig> {
     build_client_config(tls)
 }
 
-pub fn parse_server_name_override(raw: &str) -> Result<ServerName<'static>> {
-    let trimmed = raw
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(raw);
+pub fn validate_tls_options(tls: &TlsArgs) -> Result<()> {
+    if let Some(server_name) = tls.server_name.as_deref() {
+        parse_server_name_override(server_name)?;
+    }
 
-    ServerName::try_from(trimmed.to_string()).map_err(|error| {
+    validate_client_identity_args(tls)?;
+    validate_trust_args(tls)?;
+    validate_tls_file_args(tls)?;
+    validate_tls_trust_available(tls)
+}
+
+fn validate_client_identity_args(tls: &TlsArgs) -> Result<()> {
+    match (&tls.cert, &tls.key) {
+        (Some(_), None) | (None, Some(_)) => Err(AppError::invalid_config(
+            "--cert and --key must be provided together",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_trust_args(tls: &TlsArgs) -> Result<()> {
+    if tls.insecure_skip_verify && tls.ca.is_some() {
+        return Err(AppError::invalid_config(
+            "--ca cannot be used with --insecure-skip-verify",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_tls_file_args(tls: &TlsArgs) -> Result<()> {
+    validate_optional_path("--ca", tls.ca.as_deref())?;
+    validate_optional_path("--cert", tls.cert.as_deref())?;
+    validate_optional_path("--key", tls.key.as_deref())
+}
+
+fn validate_optional_path(flag: &str, path: Option<&Path>) -> Result<()> {
+    if path.is_some_and(|path| path.as_os_str().is_empty()) {
+        return Err(AppError::invalid_config(format!(
+            "{flag} must not be empty"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_tls_trust_available(tls: &TlsArgs) -> Result<()> {
+    if tls.insecure_skip_verify || tls.ca.is_some() {
+        return Ok(());
+    }
+
+    validate_bundled_roots_available()
+}
+
+pub fn parse_server_name_override(raw: &str) -> Result<ServerName<'static>> {
+    let name = normalize_server_name_override(raw)?;
+
+    ServerName::try_from(name.to_string()).map_err(|error| {
         AppError::invalid_config(format!("invalid TLS server name override {raw:?}: {error}"))
     })
+}
+
+fn normalize_server_name_override(raw: &str) -> Result<&str> {
+    let Some(inner) = raw.strip_prefix('[') else {
+        if raw.contains(['[', ']']) {
+            return Err(invalid_bracketed_server_name(raw));
+        }
+        return Ok(raw);
+    };
+
+    let Some(inner) = inner.strip_suffix(']') else {
+        return Err(invalid_bracketed_server_name(raw));
+    };
+    if inner.parse::<Ipv6Addr>().is_err() {
+        return Err(invalid_bracketed_server_name(raw));
+    }
+
+    Ok(inner)
+}
+
+fn invalid_bracketed_server_name(raw: &str) -> AppError {
+    AppError::invalid_config(format!(
+        "invalid TLS server name override {raw:?}: brackets are only allowed around IPv6 addresses"
+    ))
+}
+
+#[cfg(feature = "webpki")]
+fn validate_bundled_roots_available() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(feature = "webpki"))]
+fn validate_bundled_roots_available() -> Result<()> {
+    Err(AppError::invalid_config(
+        "TLS trust store is empty because bundled roots are disabled; provide --ca or --insecure-skip-verify",
+    ))
 }
 
 fn build_client_config(tls: &TlsArgs) -> Result<ClientConfig> {
@@ -70,12 +157,7 @@ fn load_root_store(path: Option<&Path>) -> Result<RootCertStore> {
     roots.extend(TLS_SERVER_ROOTS.iter().cloned());
 
     if let Some(path) = path {
-        let file = File::open(path).map_err(|error| {
-            AppError::invalid_config(format!(
-                "failed to open CA file {}: {error}",
-                diagnostic::path(path)
-            ))
-        })?;
+        let file = open_regular_pem_file(path, "CA file")?;
         let mut reader = BufReader::new(file);
         let certs = rustls_pemfile::certs(&mut reader)
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -115,12 +197,7 @@ fn load_client_identity(
             "--cert and --key must be provided together",
         )),
         (Some(cert_path), Some(key_path)) => {
-            let cert_file = File::open(cert_path).map_err(|error| {
-                AppError::invalid_config(format!(
-                    "failed to open client certificate {}: {error}",
-                    diagnostic::path(cert_path)
-                ))
-            })?;
+            let cert_file = open_regular_pem_file(cert_path, "client certificate")?;
             let mut cert_reader = BufReader::new(cert_file);
             let certs = rustls_pemfile::certs(&mut cert_reader)
                 .collect::<std::result::Result<Vec<_>, _>>()
@@ -138,12 +215,7 @@ fn load_client_identity(
                 )));
             }
 
-            let key_file = File::open(key_path).map_err(|error| {
-                AppError::invalid_config(format!(
-                    "failed to open client key {}: {error}",
-                    diagnostic::path(key_path)
-                ))
-            })?;
+            let key_file = open_regular_pem_file(key_path, "client key")?;
             let mut key_reader = BufReader::new(key_file);
             let key = rustls_pemfile::private_key(&mut key_reader).map_err(|error| {
                 AppError::invalid_config(format!(
@@ -162,6 +234,28 @@ fn load_client_identity(
             Ok(Some((certs, key)))
         }
     }
+}
+
+fn open_regular_pem_file(path: &Path, label: &str) -> Result<File> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        AppError::invalid_config(format!(
+            "failed to inspect {label} {}: {error}",
+            diagnostic::path(path)
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::invalid_config(format!(
+            "{label} {} is not a regular file",
+            diagnostic::path(path)
+        )));
+    }
+
+    File::open(path).map_err(|error| {
+        AppError::invalid_config(format!(
+            "failed to open {label} {}: {error}",
+            diagnostic::path(path)
+        ))
+    })
 }
 
 #[derive(Debug)]
@@ -212,5 +306,172 @@ impl ServerCertVerifier for InsecureVerifier {
             SignatureScheme::RSA_PKCS1_SHA384,
             SignatureScheme::RSA_PKCS1_SHA512,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::cli::TlsArgs;
+
+    use super::{
+        open_regular_pem_file, parse_server_name_override, validate_tls_options,
+        validate_tls_trust_available,
+    };
+
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let path = temp_dir_path(prefix);
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn remove_temp_dir(path: &Path) {
+        let _ = fs::remove_dir(path);
+    }
+
+    #[test]
+    fn server_name_override_accepts_bracketed_ipv6_literal() {
+        let server_name = parse_server_name_override("[::1]").unwrap();
+
+        assert_eq!(server_name.to_str(), "::1");
+    }
+
+    #[test]
+    fn server_name_override_rejects_bracketed_dns_name() {
+        let error = parse_server_name_override("[localhost]").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid TLS server name override \"[localhost]\": brackets are only allowed around IPv6 addresses"
+        );
+    }
+
+    #[test]
+    fn server_name_override_rejects_unmatched_bracket() {
+        let error = parse_server_name_override("localhost]").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid TLS server name override \"localhost]\": brackets are only allowed around IPv6 addresses"
+        );
+    }
+
+    #[test]
+    fn tls_options_validate_server_name_before_trust_store() {
+        let tls = TlsArgs {
+            server_name: Some("[localhost]".to_string()),
+            ..TlsArgs::default()
+        };
+
+        let error = validate_tls_options(&tls).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid TLS server name override \"[localhost]\": brackets are only allowed around IPv6 addresses"
+        );
+    }
+
+    #[test]
+    fn tls_options_validate_client_identity_pair_before_trust_store() {
+        let tls = TlsArgs {
+            cert: Some(PathBuf::from("client.pem")),
+            ..TlsArgs::default()
+        };
+
+        let error = validate_tls_options(&tls).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "--cert and --key must be provided together"
+        );
+    }
+
+    #[test]
+    fn tls_options_reject_conflicting_trust_controls_before_trust_store() {
+        let tls = TlsArgs {
+            ca: Some(PathBuf::from("ca.pem")),
+            insecure_skip_verify: true,
+            ..TlsArgs::default()
+        };
+
+        let error = validate_tls_options(&tls).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "--ca cannot be used with --insecure-skip-verify"
+        );
+    }
+
+    #[test]
+    fn tls_options_reject_empty_file_paths() {
+        let tls = TlsArgs {
+            ca: Some(PathBuf::new()),
+            ..TlsArgs::default()
+        };
+
+        let error = validate_tls_options(&tls).unwrap_err();
+
+        assert_eq!(error.to_string(), "--ca must not be empty");
+    }
+
+    #[test]
+    fn tls_pem_files_must_be_regular_files() {
+        let path = create_temp_dir("salus-tls-non-regular");
+
+        let error = open_regular_pem_file(&path, "CA file").unwrap_err();
+
+        assert!(error.to_string().contains("is not a regular file"));
+
+        remove_temp_dir(&path);
+    }
+
+    #[test]
+    fn tls_trust_is_available_with_custom_ca() {
+        let tls = TlsArgs {
+            ca: Some(PathBuf::from("ca.pem")),
+            ..TlsArgs::default()
+        };
+
+        validate_tls_trust_available(&tls).unwrap();
+    }
+
+    #[test]
+    fn tls_trust_is_available_when_verification_is_disabled() {
+        let tls = TlsArgs {
+            insecure_skip_verify: true,
+            ..TlsArgs::default()
+        };
+
+        validate_tls_trust_available(&tls).unwrap();
+    }
+
+    #[cfg(feature = "webpki")]
+    #[test]
+    fn tls_trust_is_available_with_bundled_roots() {
+        validate_tls_trust_available(&TlsArgs::default()).unwrap();
+    }
+
+    #[cfg(not(feature = "webpki"))]
+    #[test]
+    fn tls_trust_requires_ca_without_bundled_roots() {
+        let error = validate_tls_trust_available(&TlsArgs::default()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "TLS trust store is empty because bundled roots are disabled; provide --ca or --insecure-skip-verify"
+        );
     }
 }

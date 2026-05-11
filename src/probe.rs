@@ -7,6 +7,8 @@ use crate::{
     output::{format_success, print_stderr_line},
 };
 
+pub(crate) const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeOptions {
     pub timeout: Duration,

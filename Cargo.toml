@@ -22,7 +22,7 @@ include = [
 
 [features]
 default = ["grpc", "webpki"]
-grpc = ["dep:tonic", "dep:tonic-health", "dep:tower-service"]
+grpc = ["dep:tonic", "dep:tonic-health"]
 webpki = ["dep:webpki-roots"]
 
 [dependencies]
@@ -38,6 +38,7 @@ http-body-util = { version = "0.1.3", default-features = false }
 hyper = { version = "1.9.0", default-features = false, features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["http1", "http2", "ring", "tls12"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["client-legacy", "http1", "http2", "tokio"] }
+tower-service = { version = "0.3.3", default-features = false }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 
 # TLS configuration, PEM parsing, and bundled roots
@@ -48,7 +49,6 @@ webpki-roots = { version = "1.0.7", default-features = false, optional = true }
 # gRPC health probe client support
 tonic = { version = "0.14.6", default-features = false, features = ["channel", "tls-ring"], optional = true }
 tonic-health = { version = "0.14.6", default-features = false, optional = true }
-tower-service = { version = "0.3.3", default-features = false, optional = true }
 
 # Shared error definitions
 thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
