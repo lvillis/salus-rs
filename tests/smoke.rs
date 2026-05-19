@@ -2127,6 +2127,22 @@ async fn grpc_probe_fails_when_service_is_unregistered() {
 
 #[cfg(feature = "grpc")]
 #[tokio::test]
+async fn grpc_probe_rejects_empty_service_name() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "grpc",
+        "--addr",
+        "127.0.0.1:9",
+        "--service",
+        "",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
 async fn grpc_probe_rejects_invalid_authority() {
     let code = salus::main_entry(args(&[
         "salus",

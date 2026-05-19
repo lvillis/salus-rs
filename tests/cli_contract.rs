@@ -632,6 +632,16 @@ fn quiet_prescan_stops_at_non_utf8_unknown_argument() {
 
 #[cfg(unix)]
 #[test]
+fn quiet_prescan_keeps_valid_quiet_before_non_utf8_unknown_argument() {
+    let output = run_salus_os(&[OsString::from("--quiet"), non_utf8_arg()]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
 fn quiet_prescan_stops_at_non_utf8_unknown_subcommand_argument() {
     let output = run_salus_os(&[
         OsString::from("file"),
@@ -642,6 +652,20 @@ fn quiet_prescan_stops_at_non_utf8_unknown_subcommand_argument() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn quiet_prescan_keeps_valid_subcommand_quiet_before_non_utf8_unknown_argument() {
+    let output = run_salus_os(&[
+        OsString::from("file"),
+        OsString::from("--quiet"),
+        non_utf8_arg(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[cfg(unix)]
@@ -1531,6 +1555,24 @@ fn http_target_errors_are_reported_before_request_and_assertion_errors() {
         assert!(!stderr.contains("unsupported HTTP method"));
         assert!(!stderr.contains("--contains must not be empty"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn http_unix_socket_target_errors_are_reported_before_tls_mode_errors() {
+    let output = run_salus(&[
+        "http",
+        "--sock",
+        "/tmp/salus-missing-path.sock",
+        "--ca",
+        "ca.pem",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--path is required with --sock"));
+    assert!(!stderr.contains("TLS flags are not supported with --sock"));
 }
 
 #[test]

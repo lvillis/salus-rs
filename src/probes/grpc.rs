@@ -31,6 +31,9 @@ pub async fn run(
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
     validate_non_empty_str("--addr", &args.addr)?;
+    if let Some(service) = args.service.as_deref() {
+        validate_non_empty_str("--service", service)?;
+    }
     if let Some(authority) = args.authority.as_deref() {
         validate_non_empty_str("--authority", authority)?;
     }
@@ -269,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn grpc_target_omits_empty_service_name() {
-        assert_eq!(grpc_target("127.0.0.1:50051", Some("")), "127.0.0.1:50051");
+    fn grpc_target_omits_missing_service_name() {
+        assert_eq!(grpc_target("127.0.0.1:50051", None), "127.0.0.1:50051");
     }
 }

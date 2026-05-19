@@ -123,7 +123,7 @@ impl<'a> Scanner<'a> {
             }
 
             let Some(arg) = arg.to_str() else {
-                return false;
+                return output.quiet();
             };
             match self.skip_option_value_for_quiet(arg, &output) {
                 QuietSkip::Consumed => continue,
@@ -166,7 +166,7 @@ impl<'a> Scanner<'a> {
             }
 
             let Some(arg) = arg.to_str() else {
-                return false;
+                return output.quiet();
             };
             match self.skip_option_value_for_quiet(arg, &output) {
                 QuietSkip::Consumed => continue,

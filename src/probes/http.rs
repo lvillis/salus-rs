@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     task::{Context, Poll},
 };
 
@@ -54,41 +54,43 @@ pub async fn run(
     args: &HttpArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    validate_http_target_args(args)?;
+    let probe = prepare_http_probe(args)?;
 
-    if let Some(sock) = args.sock.as_ref() {
-        let target = prepare_unix_socket_target(args, sock)?;
-        let method = parse_method(&args.method)?;
-        validate_http_body_assertion_values(args)?;
-        let prepared = PreparedHttpArgs::from_args(args, method)?;
-        validate_http_capture_args(args)?;
-        validate_http_method_assertions(args, &prepared.method)?;
-        let request = build_request(target.request_uri.clone(), &target.host, &prepared)?;
-        return run_unix_socket(options, args, prepared, request, sock, target, started).await;
+    match probe.target {
+        HttpTarget::Url(target) => {
+            run_url(
+                options,
+                args,
+                probe.prepared,
+                probe.request,
+                target,
+                started,
+            )
+            .await
+        }
+        HttpTarget::UnixSocket(target) => {
+            run_unix_socket(
+                options,
+                args,
+                probe.prepared,
+                probe.request,
+                target,
+                started,
+            )
+            .await
+        }
     }
+}
 
-    let raw_url = args
-        .url
-        .as_deref()
-        .ok_or_else(|| AppError::invalid_config("--url is required when --sock is not set"))?;
-    let target = prepare_url_target(args, raw_url)?;
-
-    if !target.uses_tls && has_tls_flags(&args.tls) {
-        return Err(AppError::invalid_config(
-            "TLS flags may only be used with https URLs",
-        ));
-    }
-    if target.uses_tls {
-        validate_tls_options(&args.tls)?;
-    }
-
-    let method = parse_method(&args.method)?;
-    validate_http_body_assertion_values(args)?;
-    let prepared = PreparedHttpArgs::from_args(args, method)?;
-    validate_http_capture_args(args)?;
-    validate_http_method_assertions(args, &prepared.method)?;
+async fn run_url(
+    options: ProbeOptions,
+    args: &HttpArgs,
+    prepared: PreparedHttpArgs,
+    request: Request<Empty<Bytes>>,
+    target: UrlTarget,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
     let client = build_url_http_client(target.uses_tls, &args.tls, target.connect_uri.clone())?;
-    let request = build_request(target.request_uri.clone(), &target.host, &prepared)?;
     let target_label = target.label;
 
     with_probe_timeout("HTTP", options.timeout, async move {
@@ -106,14 +108,13 @@ async fn run_unix_socket(
     args: &HttpArgs,
     prepared: PreparedHttpArgs,
     request: Request<Empty<Bytes>>,
-    sock: &Path,
     target: UnixSocketTarget,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    let sock_label = diagnostic::path(sock);
+    let sock_label = diagnostic::path(&target.sock);
 
     with_probe_timeout("HTTP", options.timeout, async move {
-        let stream = UnixStream::connect(sock).await.map_err(|error| {
+        let stream = UnixStream::connect(&target.sock).await.map_err(|error| {
             AppError::failure(format!(
                 "failed to connect to unix socket {sock_label}: {error}"
             ))
@@ -136,7 +137,35 @@ async fn run_unix_socket(
     .await
 }
 
+struct PreparedHttpProbe {
+    target: HttpTarget,
+    prepared: PreparedHttpArgs,
+    request: Request<Empty<Bytes>>,
+}
+
+enum HttpTarget {
+    Url(UrlTarget),
+    UnixSocket(UnixSocketTarget),
+}
+
+impl HttpTarget {
+    fn request_uri(&self) -> &Uri {
+        match self {
+            Self::Url(target) => &target.request_uri,
+            Self::UnixSocket(target) => &target.request_uri,
+        }
+    }
+
+    fn host(&self) -> &str {
+        match self {
+            Self::Url(target) => &target.host,
+            Self::UnixSocket(target) => &target.host,
+        }
+    }
+}
+
 struct UnixSocketTarget {
+    sock: PathBuf,
     host: String,
     label: String,
     request_uri: Uri,
@@ -150,20 +179,52 @@ struct UrlTarget {
     uses_tls: bool,
 }
 
+fn prepare_http_probe(args: &HttpArgs) -> Result<PreparedHttpProbe> {
+    let target = prepare_http_target(args)?;
+    let method = parse_method(&args.method)?;
+    validate_http_body_assertion_values(args)?;
+    let prepared = PreparedHttpArgs::from_args(args, method)?;
+    validate_http_capture_args(args)?;
+    validate_http_method_assertions(args, &prepared.method)?;
+    let request = build_request(target.request_uri().clone(), target.host(), &prepared)?;
+
+    Ok(PreparedHttpProbe {
+        target,
+        prepared,
+        request,
+    })
+}
+
+fn prepare_http_target(args: &HttpArgs) -> Result<HttpTarget> {
+    validate_http_target_args(args)?;
+
+    if let Some(sock) = args.sock.as_ref() {
+        return prepare_unix_socket_target(args, sock).map(HttpTarget::UnixSocket);
+    }
+
+    let raw_url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| AppError::invalid_config("--url is required when --sock is not set"))?;
+    let target = prepare_url_target(args, raw_url)?;
+    validate_url_tls_args(&args.tls, target.uses_tls)?;
+    Ok(HttpTarget::Url(target))
+}
+
 #[cfg(unix)]
 fn prepare_unix_socket_target(args: &HttpArgs, sock: &Path) -> Result<UnixSocketTarget> {
     validate_non_empty_path("--sock", sock)?;
-    if has_tls_flags(&args.tls) {
-        return Err(AppError::invalid_config(
-            "TLS flags are not supported with --sock",
-        ));
-    }
 
     let path = args
         .path
         .as_deref()
         .ok_or_else(|| AppError::invalid_config("--path is required with --sock"))?;
     let request_uri = prepare_uds_request_uri(path)?;
+    if has_tls_flags(&args.tls) {
+        return Err(AppError::invalid_config(
+            "TLS flags are not supported with --sock",
+        ));
+    }
     let host = match args.host.as_deref() {
         Some(host) => explicit_host_header(host)?,
         None => "localhost".to_string(),
@@ -172,6 +233,7 @@ fn prepare_unix_socket_target(args: &HttpArgs, sock: &Path) -> Result<UnixSocket
     let label = format!("unix:{sock_label}{path}");
 
     Ok(UnixSocketTarget {
+        sock: sock.to_path_buf(),
         host,
         label,
         request_uri,
@@ -227,13 +289,25 @@ fn prepare_url_target(args: &HttpArgs, raw_url: &str) -> Result<UrlTarget> {
     })
 }
 
+fn validate_url_tls_args(tls: &TlsArgs, uses_tls: bool) -> Result<()> {
+    if !uses_tls && has_tls_flags(tls) {
+        return Err(AppError::invalid_config(
+            "TLS flags may only be used with https URLs",
+        ));
+    }
+    if uses_tls {
+        validate_tls_options(tls)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(not(unix))]
 async fn run_unix_socket(
     _options: ProbeOptions,
     _args: &HttpArgs,
     _prepared: PreparedHttpArgs,
     _request: Request<Empty<Bytes>>,
-    _sock: &Path,
     _target: UnixSocketTarget,
     _started: std::time::Instant,
 ) -> Result<ProbeReport> {
