@@ -3,10 +3,12 @@ use std::{
     io,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use hyper::http::{Uri, uri::Scheme};
 use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
+use hyper_util::client::legacy::connect::HttpConnector;
 use tonic::transport::Endpoint;
 use tonic_health::pb::{
     HealthCheckRequest, health_check_response::ServingStatus, health_client::HealthClient,
@@ -15,11 +17,12 @@ use tower_service::Service;
 
 use crate::{
     authority::{PortPolicy, RawFormat, validate_authority},
-    cli::GrpcArgs,
+    cli::{GrpcArgs, TlsArgs},
     diagnostic,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport},
+    probe::{ProbeOptions, ProbeReport, with_probe_timeout},
     tls::{build_http_tls_config, parse_server_name_override, validate_tls_options},
+    validation::validate_non_empty_str,
 };
 
 pub async fn run(
@@ -27,14 +30,9 @@ pub async fn run(
     args: &GrpcArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    if args.addr.is_empty() {
-        return Err(AppError::invalid_config("--addr must not be empty"));
-    }
-    if args.authority.as_deref().is_some_and(str::is_empty) {
-        return Err(AppError::invalid_config("--authority must not be empty"));
-    }
-    if !args.tls && has_tls_flags(args) {
-        return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
+    validate_non_empty_str("--addr", &args.addr)?;
+    if let Some(authority) = args.authority.as_deref() {
+        validate_non_empty_str("--authority", authority)?;
     }
     validate_authority(
         &args.addr,
@@ -50,6 +48,9 @@ pub async fn run(
             RawFormat::Debug,
         )?;
     }
+    if !args.tls && has_tls_flags(args) {
+        return Err(AppError::invalid_config("gRPC TLS flags require --tls"));
+    }
     if args.tls {
         validate_tls_options(&args.tls_args)?;
     }
@@ -57,61 +58,16 @@ pub async fn run(
     let endpoint_uri = format!("http://{}", args.addr);
     let request_scheme = if args.tls { "https" } else { "http" };
     let target = grpc_target(&args.addr, args.service.as_deref());
+    let endpoint = prepare_grpc_endpoint(args, &endpoint_uri, request_scheme, options.timeout)?;
+    let tls_connector = if args.tls {
+        Some(build_grpc_tls_connector(&args.tls_args)?)
+    } else {
+        None
+    };
 
     let timeout = options.timeout;
-    let result = tokio::time::timeout(timeout, async {
-        let mut endpoint = Endpoint::from_shared(endpoint_uri.clone()).map_err(|error| {
-            AppError::invalid_config(format!("invalid gRPC endpoint {endpoint_uri}: {error}"))
-        })?;
-        endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
-
-        if let Some(authority) = &args.authority {
-            let origin = format!("{request_scheme}://{authority}")
-                .parse()
-                .map_err(|error| {
-                    AppError::invalid_config(format!("invalid gRPC authority {authority}: {error}"))
-                })?;
-            endpoint = endpoint.origin(origin);
-        } else if args.tls {
-            let origin = format!("https://{}", args.addr).parse().map_err(|error| {
-                AppError::invalid_config(format!(
-                    "invalid gRPC TLS origin https://{}: {error}",
-                    args.addr
-                ))
-            })?;
-            endpoint = endpoint.origin(origin);
-        }
-
-        let channel = if args.tls {
-            let tls_config = build_http_tls_config(&args.tls_args)?;
-            let builder = HttpsConnectorBuilder::new()
-                .with_tls_config(tls_config)
-                .https_only();
-            let builder = match args.tls_args.server_name.as_deref() {
-                Some(server_name) => builder.with_server_name_resolver(
-                    FixedServerNameResolver::new(parse_server_name_override(server_name)?),
-                ),
-                None => builder,
-            };
-            let connector = GrpcTlsConnector::new(builder.enable_http2().build());
-
-            endpoint
-                .connect_with_connector(connector)
-                .await
-                .map_err(|error| {
-                    AppError::failure(format!(
-                        "failed to connect to gRPC target {}: {error}",
-                        args.addr
-                    ))
-                })?
-        } else {
-            endpoint.connect().await.map_err(|error| {
-                AppError::failure(format!(
-                    "failed to connect to gRPC target {}: {error}",
-                    args.addr
-                ))
-            })?
-        };
+    with_probe_timeout("gRPC", timeout, async move {
+        let channel = connect_grpc_channel(endpoint, tls_connector, &args.addr).await?;
 
         let mut client = HealthClient::new(channel);
         let response = client
@@ -141,28 +97,87 @@ pub async fn run(
             options,
         ))
     })
-    .await;
+    .await
+}
 
-    match result {
-        Ok(inner) => inner,
-        Err(_) => Err(AppError::failure(format!(
-            "gRPC probe timed out after {}",
-            humantime::format_duration(timeout)
-        ))),
+fn prepare_grpc_endpoint(
+    args: &GrpcArgs,
+    endpoint_uri: &str,
+    request_scheme: &str,
+    timeout: Duration,
+) -> Result<Endpoint> {
+    let mut endpoint = Endpoint::from_shared(endpoint_uri.to_string()).map_err(|error| {
+        AppError::invalid_config(format!("invalid gRPC endpoint {endpoint_uri}: {error}"))
+    })?;
+    endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
+
+    if let Some(authority) = &args.authority {
+        let origin = format!("{request_scheme}://{authority}")
+            .parse()
+            .map_err(|error| {
+                AppError::invalid_config(format!("invalid gRPC authority {authority}: {error}"))
+            })?;
+        endpoint = endpoint.origin(origin);
+    } else if args.tls {
+        let origin = format!("https://{}", args.addr).parse().map_err(|error| {
+            AppError::invalid_config(format!(
+                "invalid gRPC TLS origin https://{}: {error}",
+                args.addr
+            ))
+        })?;
+        endpoint = endpoint.origin(origin);
+    }
+
+    Ok(endpoint)
+}
+
+type GrpcHttpsConnector = hyper_rustls::HttpsConnector<HttpConnector>;
+
+fn build_grpc_tls_connector(tls: &TlsArgs) -> Result<GrpcTlsConnector<GrpcHttpsConnector>> {
+    let tls_config = build_http_tls_config(tls)?;
+    let builder = HttpsConnectorBuilder::new()
+        .with_tls_config(tls_config)
+        .https_only();
+    let builder = match tls.server_name.as_deref() {
+        Some(server_name) => builder.with_server_name_resolver(FixedServerNameResolver::new(
+            parse_server_name_override(server_name)?,
+        )),
+        None => builder,
+    };
+
+    Ok(GrpcTlsConnector::new(builder.enable_http2().build()))
+}
+
+async fn connect_grpc_channel(
+    endpoint: Endpoint,
+    tls_connector: Option<GrpcTlsConnector<GrpcHttpsConnector>>,
+    addr: &str,
+) -> Result<tonic::transport::Channel> {
+    match tls_connector {
+        Some(connector) => endpoint
+            .connect_with_connector(connector)
+            .await
+            .map_err(|error| {
+                AppError::failure(format!("failed to connect to gRPC target {addr}: {error}"))
+            }),
+        None => endpoint.connect().await.map_err(|error| {
+            AppError::failure(format!("failed to connect to gRPC target {addr}: {error}"))
+        }),
     }
 }
 
 fn grpc_target(addr: &str, service: Option<&str>) -> String {
     match service {
-        Some(service) if !service.is_empty() => format!("{addr} service={service:?}"),
+        Some(service) if !service.is_empty() => {
+            format!("{addr} service={}", diagnostic::value(service))
+        }
         _ => addr.to_string(),
     }
 }
 
 fn grpc_status_error(target: &str, status: &tonic::Status) -> AppError {
     AppError::failure(format!(
-        "gRPC health check for {} failed: code={:?} message={}",
-        diagnostic::value(target),
+        "gRPC health check for {target} failed: code={:?} message={}",
         status.code(),
         diagnostic::value(status.message())
     ))
@@ -241,7 +256,15 @@ mod tests {
     fn grpc_target_includes_service_name() {
         assert_eq!(
             grpc_target("127.0.0.1:50051", Some("db")),
-            "127.0.0.1:50051 service=\"db\""
+            "127.0.0.1:50051 service=db"
+        );
+    }
+
+    #[test]
+    fn grpc_target_escapes_service_name_controls() {
+        assert_eq!(
+            grpc_target("127.0.0.1:50051", Some("db\nnext")),
+            "127.0.0.1:50051 service=\"db\\nnext\""
         );
     }
 

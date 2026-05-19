@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use crate::{
     cli::Cli,
@@ -7,7 +7,23 @@ use crate::{
     output::{format_success, print_stderr_line},
 };
 
-pub(crate) const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) async fn with_probe_timeout<T>(
+    mode_label: &str,
+    timeout: Duration,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(probe_timeout_error(mode_label, timeout)),
+    }
+}
+
+fn probe_timeout_error(mode_label: &str, timeout: Duration) -> AppError {
+    AppError::failure(format!(
+        "{mode_label} probe timed out after {}",
+        humantime::format_duration(timeout)
+    ))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeOptions {
@@ -106,7 +122,7 @@ pub fn deadline_after(timeout: Duration) -> Result<tokio::time::Instant> {
 mod tests {
     use std::time::Duration;
 
-    use super::{ProbeOptions, ProbeReport, deadline_after};
+    use super::{ProbeOptions, ProbeReport, deadline_after, with_probe_timeout};
 
     #[test]
     fn deadline_after_rejects_overflowing_timeout() {
@@ -133,5 +149,16 @@ mod tests {
         let error = report.enforce_max_latency().unwrap_err();
 
         assert!(error.to_string().contains(r#""/tmp/ready\nnext""#));
+    }
+
+    #[tokio::test]
+    async fn probe_timeout_error_includes_probe_mode_and_duration() {
+        let error = with_probe_timeout("HTTP", Duration::from_millis(1), async {
+            std::future::pending::<super::Result<()>>().await
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "HTTP probe timed out after 1ms");
     }
 }

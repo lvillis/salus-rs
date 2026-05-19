@@ -23,6 +23,7 @@ pub struct Cli {
         long,
         global = true,
         default_value = "3s",
+        allow_negative_numbers = true,
         value_name = "DURATION",
         value_parser = parse_duration,
         help = "Hard deadline for one probe"
@@ -31,6 +32,7 @@ pub struct Cli {
     #[arg(
         long = "max-latency",
         global = true,
+        allow_negative_numbers = true,
         value_name = "DURATION",
         value_parser = parse_duration,
         help = "Fail if a successful probe takes longer than this"
@@ -119,6 +121,7 @@ pub struct HttpArgs {
     #[arg(
         long,
         action = ArgAction::Append,
+        allow_negative_numbers = true,
         value_name = "CODE|RANGE",
         help_heading = "Assertions",
         help = "Accepted status code or inclusive range"
@@ -184,6 +187,7 @@ pub struct HttpArgs {
     #[arg(
         long = "max-body",
         default_value_t = 65_536,
+        allow_negative_numbers = true,
         value_name = "BYTES",
         help_heading = "Limits",
         help = "Maximum response body bytes to read for body assertions, up to 16 MiB"
@@ -228,6 +232,7 @@ pub struct ExecArgs {
     #[arg(
         long = "exit-code",
         action = ArgAction::Append,
+        allow_negative_numbers = true,
         value_name = "CODE",
         help_heading = "Assertions",
         help = "Accepted process exit code"
@@ -252,17 +257,13 @@ pub struct ExecArgs {
     #[arg(
         long = "max-output",
         default_value_t = 65_536,
+        allow_negative_numbers = true,
         value_name = "BYTES",
         help_heading = "Limits",
         help = "Maximum stdout and stderr bytes to keep for output assertions, up to 16 MiB"
     )]
     pub max_output: usize,
-    #[arg(
-        required = true,
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        value_name = "COMMAND"
-    )]
+    #[arg(required = true, trailing_var_arg = true, value_name = "COMMAND")]
     pub command: Vec<OsString>,
 }
 
@@ -284,18 +285,21 @@ pub struct FileArgs {
     pub contains: Vec<String>,
     #[arg(
         long,
+        allow_negative_numbers = true,
         value_name = "BYTES",
         help = "Require file size to be at least this many bytes"
     )]
     pub min_size: Option<u64>,
     #[arg(
         long,
+        allow_negative_numbers = true,
         value_name = "BYTES",
         help = "Require file size to be at most this many bytes"
     )]
     pub max_size: Option<u64>,
     #[arg(
         long,
+        allow_negative_numbers = true,
         value_name = "DURATION",
         value_parser = parse_duration,
         help = "Require file modification age to be no greater than this"
@@ -304,6 +308,7 @@ pub struct FileArgs {
     #[arg(
         long = "max-read",
         default_value_t = 65_536,
+        allow_negative_numbers = true,
         value_name = "BYTES",
         help = "Maximum file bytes to read for content assertions, up to 16 MiB"
     )]

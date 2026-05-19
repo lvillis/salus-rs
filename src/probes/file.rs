@@ -3,11 +3,16 @@ use std::time::SystemTime;
 use tokio::io::AsyncReadExt;
 
 use crate::{
+    capture::CaptureBuffer,
     cli::FileArgs,
     diagnostic,
     error::{AppError, Result},
-    probe::{MAX_CAPTURE_BYTES, ProbeOptions, ProbeReport},
+    probe::{ProbeOptions, ProbeReport, with_probe_timeout},
     text_match::{TextMatcher, contains_bytes},
+    validation::{
+        validate_capture_limit, validate_non_empty_path, validate_non_empty_values,
+        validate_positive_duration,
+    },
 };
 
 pub async fn run(
@@ -15,25 +20,12 @@ pub async fn run(
     args: &FileArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    let timeout = options.timeout;
-    match tokio::time::timeout(timeout, run_inner(options, args, started)).await {
-        Ok(result) => result,
-        Err(_) => Err(AppError::failure(format!(
-            "file probe timed out after {}",
-            humantime::format_duration(timeout)
-        ))),
-    }
+    validate_file_args(args)?;
+    with_probe_timeout("file", options.timeout, run_inner(options, args, started)).await
 }
 
-async fn run_inner(
-    options: ProbeOptions,
-    args: &FileArgs,
-    started: std::time::Instant,
-) -> Result<ProbeReport> {
-    if args.path.as_os_str().is_empty() {
-        return Err(AppError::invalid_config("--path must not be empty"));
-    }
-    let path_label = diagnostic::path(&args.path);
+fn validate_file_args(args: &FileArgs) -> Result<()> {
+    validate_non_empty_path("--path", &args.path)?;
 
     if let (Some(min_size), Some(max_size)) = (args.min_size, args.max_size)
         && min_size > max_size
@@ -44,24 +36,27 @@ async fn run_inner(
         )));
     }
 
-    if args.max_read == 0 && !args.contains.is_empty() {
-        return Err(AppError::invalid_config(
-            "--max-read must be greater than 0 when file content assertions are used",
-        ));
-    }
-    if args.max_read > MAX_CAPTURE_BYTES && !args.contains.is_empty() {
-        return Err(AppError::invalid_config(format!(
-            "--max-read must be at most {MAX_CAPTURE_BYTES} bytes when file content assertions are used"
-        )));
+    validate_non_empty_values("--contains", &args.contains)?;
+    validate_capture_limit(
+        "--max-read",
+        args.max_read,
+        "file content assertions",
+        !args.contains.is_empty(),
+    )?;
+
+    if let Some(max_age) = args.max_age {
+        validate_positive_duration("--max-age", max_age)?;
     }
 
-    if args.contains.iter().any(String::is_empty) {
-        return Err(AppError::invalid_config("--contains must not be empty"));
-    }
+    Ok(())
+}
 
-    if args.max_age.is_some_and(|max_age| max_age.is_zero()) {
-        return Err(AppError::invalid_config("--max-age must be greater than 0"));
-    }
+async fn run_inner(
+    options: ProbeOptions,
+    args: &FileArgs,
+    started: std::time::Instant,
+) -> Result<ProbeReport> {
+    let path_label = diagnostic::path(&args.path);
 
     let metadata = tokio::fs::metadata(&args.path)
         .await
@@ -125,8 +120,8 @@ async fn run_inner(
         if !args.contains.is_empty() {
             let file_body = read_file(&mut file, &args.path, args.max_read, &args.contains).await?;
             for needle in &args.contains {
-                if !contains_bytes(&file_body.bytes, needle) {
-                    if file_body.truncated {
+                if !contains_bytes(file_body.bytes(), needle) {
+                    if file_body.is_incomplete() {
                         return Err(AppError::failure(format!(
                             "file {} was truncated at {} bytes, cannot prove required text {:?}",
                             path_label, args.max_read, needle
@@ -149,21 +144,15 @@ async fn run_inner(
     ))
 }
 
-struct BufferedFile {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
 async fn read_file(
     file: &mut tokio::fs::File,
     path: &std::path::Path,
     limit: usize,
     required_texts: &[String],
-) -> Result<BufferedFile> {
-    let mut bytes = Vec::new();
+) -> Result<CaptureBuffer> {
+    let mut body = CaptureBuffer::default();
     let mut buffer = [0_u8; 4096];
     let mut matcher = TextMatcher::new(required_texts);
-    let mut truncated = false;
 
     loop {
         let read = file.read(&mut buffer).await.map_err(|error| {
@@ -176,23 +165,13 @@ async fn read_file(
             break;
         }
 
-        let previous_len = bytes.len();
-        if bytes.len() < limit {
-            let remaining = limit - bytes.len();
-            if read > remaining {
-                truncated = true;
-            }
-            let slice = &buffer[..read.min(remaining)];
-            bytes.extend_from_slice(slice);
-        } else {
-            truncated = true;
-        }
-        matcher.observe_appended(&bytes, previous_len);
+        let previous_len = body.append_limited(&buffer[..read], limit);
+        matcher.observe_appended(body.bytes(), previous_len);
 
-        if (!required_texts.is_empty() && matcher.all_matched()) || truncated {
+        if (!required_texts.is_empty() && matcher.all_matched()) || body.is_incomplete() {
             break;
         }
     }
 
-    Ok(BufferedFile { bytes, truncated })
+    Ok(body)
 }

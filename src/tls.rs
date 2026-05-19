@@ -12,9 +12,11 @@ use crate::{
     cli::TlsArgs,
     diagnostic,
     error::{AppError, Result},
+    validation::{validate_non_empty_path, validate_non_empty_str},
 };
 
 pub fn build_http_tls_config(tls: &TlsArgs) -> Result<ClientConfig> {
+    validate_tls_options(tls)?;
     build_client_config(tls)
 }
 
@@ -55,10 +57,8 @@ fn validate_tls_file_args(tls: &TlsArgs) -> Result<()> {
 }
 
 fn validate_optional_path(flag: &str, path: Option<&Path>) -> Result<()> {
-    if path.is_some_and(|path| path.as_os_str().is_empty()) {
-        return Err(AppError::invalid_config(format!(
-            "{flag} must not be empty"
-        )));
+    if let Some(path) = path {
+        validate_non_empty_path(flag, path)?;
     }
 
     Ok(())
@@ -73,6 +73,7 @@ fn validate_tls_trust_available(tls: &TlsArgs) -> Result<()> {
 }
 
 pub fn parse_server_name_override(raw: &str) -> Result<ServerName<'static>> {
+    validate_non_empty_str("--server-name", raw)?;
     let name = normalize_server_name_override(raw)?;
 
     ServerName::try_from(name.to_string()).map_err(|error| {
@@ -117,12 +118,12 @@ fn validate_bundled_roots_available() -> Result<()> {
 }
 
 fn build_client_config(tls: &TlsArgs) -> Result<ClientConfig> {
-    let roots = load_root_store(tls.ca.as_deref())?;
     let builder = rustls::ClientConfig::builder();
+    let identity = load_client_identity(tls)?;
 
     let config = if tls.insecure_skip_verify {
         let verifier = Arc::new(InsecureVerifier);
-        match load_client_identity(tls)? {
+        match identity {
             Some((certs, key)) => builder
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
@@ -136,7 +137,8 @@ fn build_client_config(tls: &TlsArgs) -> Result<ClientConfig> {
                 .with_no_client_auth(),
         }
     } else {
-        match load_client_identity(tls)? {
+        let roots = load_root_store(tls.ca.as_deref())?;
+        match identity {
             Some((certs, key)) => builder
                 .with_root_certificates(roots)
                 .with_client_auth_cert(certs, key)
@@ -367,6 +369,13 @@ mod tests {
             error.to_string(),
             "invalid TLS server name override \"localhost]\": brackets are only allowed around IPv6 addresses"
         );
+    }
+
+    #[test]
+    fn server_name_override_rejects_empty_name() {
+        let error = parse_server_name_override("").unwrap_err();
+
+        assert_eq!(error.to_string(), "--server-name must not be empty");
     }
 
     #[test]

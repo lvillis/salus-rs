@@ -7,7 +7,8 @@ use crate::{
     cli::TcpArgs,
     diagnostic,
     error::{AppError, Result},
-    probe::{ProbeOptions, ProbeReport, deadline_after},
+    probe::{ProbeOptions, ProbeReport, deadline_after, with_probe_timeout},
+    validation::validate_non_empty_str,
 };
 
 pub async fn run(
@@ -16,12 +17,10 @@ pub async fn run(
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
     let timeout = options.timeout;
-    if args.addr.is_empty() {
-        return Err(AppError::invalid_config("--addr must not be empty"));
-    }
+    validate_non_empty_str("--addr", &args.addr)?;
     validate_tcp_addr(&args.addr)?;
 
-    let result = tokio::time::timeout(timeout, async {
+    with_probe_timeout("TCP", timeout, async {
         let addrs = lookup_host(&args.addr)
             .await
             .map_err(|error| match error.kind() {
@@ -82,15 +81,7 @@ pub async fn run(
             None => format!("timed out connecting to {}", diagnostic::value(&args.addr)),
         }))
     })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(_) => Err(AppError::failure(format!(
-            "TCP probe timed out after {}",
-            humantime::format_duration(timeout)
-        ))),
-    }
+    .await
 }
 
 fn validate_tcp_addr(raw: &str) -> Result<()> {

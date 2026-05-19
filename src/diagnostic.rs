@@ -1,7 +1,11 @@
 use std::{borrow::Cow, ffi::OsStr, path::Path};
 
 pub fn value(raw: &str) -> Cow<'_, str> {
-    if raw.is_empty() || raw.trim() != raw || contains_control(raw) {
+    if raw.is_empty()
+        || contains_whitespace(raw)
+        || contains_control(raw)
+        || contains_quoted_char(raw)
+    {
         Cow::Owned(format!("{raw:?}"))
     } else {
         Cow::Borrowed(raw)
@@ -33,6 +37,14 @@ fn contains_control(raw: &str) -> bool {
     raw.chars().any(char::is_control)
 }
 
+fn contains_whitespace(raw: &str) -> bool {
+    raw.chars().any(char::is_whitespace)
+}
+
+fn contains_quoted_char(raw: &str) -> bool {
+    raw.contains(['"', '\\'])
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsStr, path::Path};
@@ -57,6 +69,17 @@ mod tests {
     #[test]
     fn value_quotes_surrounding_whitespace() {
         assert_eq!(value(" bad "), "\" bad \"");
+    }
+
+    #[test]
+    fn value_quotes_embedded_whitespace() {
+        assert_eq!(value("bad value"), "\"bad value\"");
+    }
+
+    #[test]
+    fn value_quotes_embedded_quote_and_backslash() {
+        assert_eq!(value("bad\"value"), "\"bad\\\"value\"");
+        assert_eq!(value("bad\\value"), "\"bad\\\\value\"");
     }
 
     #[test]

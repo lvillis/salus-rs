@@ -10,15 +10,17 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
     sync::watch,
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
 };
 
 use crate::{
+    capture::CaptureBuffer,
     cli::ExecArgs,
     diagnostic,
     error::{AppError, Result},
-    probe::{MAX_CAPTURE_BYTES, ProbeOptions, ProbeReport, deadline_after},
+    probe::{ProbeOptions, ProbeReport, deadline_after},
     text_match::{TextMatcher, contains_bytes},
+    validation::{validate_capture_limit, validate_non_empty_values},
 };
 
 const OUTPUT_EOF_GRACE_AFTER_LIMIT: Duration = Duration::from_millis(50);
@@ -30,23 +32,14 @@ pub async fn run(
     args: &ExecArgs,
     started: std::time::Instant,
 ) -> Result<ProbeReport> {
-    if args.max_output == 0
-        && (!args.stdout_contains.is_empty() || !args.stderr_contains.is_empty())
-    {
-        return Err(AppError::invalid_config(
-            "--max-output must be greater than 0 when output assertions are used",
-        ));
-    }
-    if args.max_output > MAX_CAPTURE_BYTES
-        && (!args.stdout_contains.is_empty() || !args.stderr_contains.is_empty())
-    {
-        return Err(AppError::invalid_config(format!(
-            "--max-output must be at most {MAX_CAPTURE_BYTES} bytes when output assertions are used"
-        )));
-    }
-
-    validate_non_empty_assertions("--stdout-contains", &args.stdout_contains)?;
-    validate_non_empty_assertions("--stderr-contains", &args.stderr_contains)?;
+    validate_non_empty_values("--stdout-contains", &args.stdout_contains)?;
+    validate_non_empty_values("--stderr-contains", &args.stderr_contains)?;
+    validate_capture_limit(
+        "--max-output",
+        args.max_output,
+        "output assertions",
+        !args.stdout_contains.is_empty() || !args.stderr_contains.is_empty(),
+    )?;
 
     let success_codes: &[i32] = if args.exit_code.is_empty() {
         &[0]
@@ -92,12 +85,12 @@ pub async fn run(
 
     let mut child = command.spawn().map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => {
-            AppError::invalid_config(format!("command {:?} was not found", program))
+            AppError::invalid_config(format!("command {command_label} was not found"))
         }
         std::io::ErrorKind::PermissionDenied => {
-            AppError::invalid_config(format!("command {:?} is not executable", program))
+            AppError::invalid_config(format!("command {command_label} is not executable"))
         }
-        _ => AppError::internal(format!("failed to spawn {:?}: {error}", program)),
+        _ => AppError::invalid_config(format!("failed to spawn {command_label}: {error}")),
     })?;
     let process_group = child_process_group(&child);
     let mut process_group_cleanup = ProcessGroupCleanup::new(process_group);
@@ -135,7 +128,7 @@ pub async fn run(
         Ok(Err(error)) => {
             terminate_child(&mut child, process_group);
             abort_output_tasks(&stdout_task, &stderr_task);
-            return Err(AppError::internal(format!(
+            return Err(AppError::failure(format!(
                 "failed waiting for child: {error}"
             )));
         }
@@ -177,36 +170,26 @@ pub async fn run(
     let stderr = await_output_task(&mut stderr_task, "stderr", deadline).await?;
 
     for needle in &args.stdout_contains {
-        if !contains_bytes(&stdout.bytes, needle) {
-            if stdout.cannot_prove_absence() {
-                return Err(output_limit_error(
-                    "stdout",
-                    &command_label,
-                    args.max_output,
-                    needle,
-                ));
-            }
-            return Err(AppError::failure(format!(
-                "stdout of {command_label} does not contain required text {:?}",
-                needle
-            )));
+        if !contains_bytes(stdout.bytes(), needle) {
+            return Err(missing_required_output_error(
+                &stdout,
+                "stdout",
+                &command_label,
+                args.max_output,
+                needle,
+            ));
         }
     }
 
     for needle in &args.stderr_contains {
-        if !contains_bytes(&stderr.bytes, needle) {
-            if stderr.cannot_prove_absence() {
-                return Err(output_limit_error(
-                    "stderr",
-                    &command_label,
-                    args.max_output,
-                    needle,
-                ));
-            }
-            return Err(AppError::failure(format!(
-                "stderr of {command_label} does not contain required text {:?}",
-                needle
-            )));
+        if !contains_bytes(stderr.bytes(), needle) {
+            return Err(missing_required_output_error(
+                &stderr,
+                "stderr",
+                &command_label,
+                args.max_output,
+                needle,
+            ));
         }
     }
 
@@ -221,8 +204,7 @@ pub async fn run(
 
 #[derive(Clone, Debug, Default)]
 struct BufferedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
+    content: CaptureBuffer,
     matched: bool,
     limit_reached: bool,
     complete: bool,
@@ -238,7 +220,7 @@ type OutputTask = JoinHandle<Result<BufferedOutput>>;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct OutputProgress {
-    truncated: bool,
+    incomplete: bool,
     matched: bool,
     limit_reached: bool,
 }
@@ -246,7 +228,7 @@ struct OutputProgress {
 impl From<&BufferedOutput> for OutputProgress {
     fn from(output: &BufferedOutput) -> Self {
         Self {
-            truncated: output.truncated,
+            incomplete: output.content.is_incomplete(),
             matched: output.matched,
             limit_reached: output.limit_reached,
         }
@@ -263,16 +245,6 @@ impl OutputCapture {
     }
 }
 
-fn validate_non_empty_assertions(flag: &str, values: &[String]) -> Result<()> {
-    if values.iter().any(String::is_empty) {
-        return Err(AppError::invalid_config(format!(
-            "{flag} must not be empty"
-        )));
-    }
-
-    Ok(())
-}
-
 async fn await_output_task(
     capture: &mut Option<OutputCapture>,
     stream_name: &'static str,
@@ -287,9 +259,7 @@ async fn await_output_task(
 
     loop {
         if capture.task.is_finished() {
-            return (&mut capture.task).await.map_err(|error| {
-                AppError::internal(format!("{stream_name} task failed: {error}"))
-            })?;
+            return await_finished_output_task(capture, stream_name).await;
         }
 
         let progress = capture.progress();
@@ -298,20 +268,20 @@ async fn await_output_task(
             capture.task.abort();
             return Ok(snapshot);
         }
-        if progress.truncated {
+        if progress.incomplete {
             let snapshot = capture.snapshot()?;
             capture.task.abort();
             return Ok(snapshot);
         }
         if progress.limit_reached {
-            match wait_for_output_eof_after_limit(capture, deadline).await? {
+            match wait_for_output_eof_after_limit(capture, stream_name, deadline).await? {
                 LimitWait::Finished(output) => return Ok(output),
                 LimitWait::StillOpen(snapshot) => return Ok(snapshot),
                 LimitWait::Changed => continue,
             }
         }
 
-        match wait_for_output_idle_after_exit(capture, output_deadline).await? {
+        match wait_for_output_idle_after_exit(capture, stream_name, output_deadline).await? {
             LimitWait::Finished(output) => return Ok(output),
             LimitWait::StillOpen(snapshot) => return Ok(snapshot),
             LimitWait::Changed => continue,
@@ -327,20 +297,23 @@ enum LimitWait {
 
 async fn wait_for_output_idle_after_exit(
     capture: &mut OutputCapture,
+    stream_name: &'static str,
     deadline: tokio::time::Instant,
 ) -> Result<LimitWait> {
-    wait_for_output_settle(capture, deadline, OUTPUT_IDLE_GRACE_AFTER_EXIT).await
+    wait_for_output_settle(capture, stream_name, deadline, OUTPUT_IDLE_GRACE_AFTER_EXIT).await
 }
 
 async fn wait_for_output_eof_after_limit(
     capture: &mut OutputCapture,
+    stream_name: &'static str,
     deadline: tokio::time::Instant,
 ) -> Result<LimitWait> {
-    wait_for_output_settle(capture, deadline, OUTPUT_EOF_GRACE_AFTER_LIMIT).await
+    wait_for_output_settle(capture, stream_name, deadline, OUTPUT_EOF_GRACE_AFTER_LIMIT).await
 }
 
 async fn wait_for_output_settle(
     capture: &mut OutputCapture,
+    stream_name: &'static str,
     deadline: tokio::time::Instant,
     max_grace: Duration,
 ) -> Result<LimitWait> {
@@ -356,19 +329,38 @@ async fn wait_for_output_settle(
 
     tokio::select! {
         join_result = &mut capture.task => {
-            let output = join_result
-                .map_err(|error| AppError::internal(format!("output task failed: {error}")))??;
+            let output = finish_output_task(join_result, stream_name)?;
             Ok(LimitWait::Finished(output))
         }
         changed = capture.progress.changed() => {
-            let _ = changed;
-            Ok(LimitWait::Changed)
+            if changed.is_ok() {
+                Ok(LimitWait::Changed)
+            } else {
+                await_finished_output_task(capture, stream_name)
+                    .await
+                    .map(LimitWait::Finished)
+            }
         }
         () = &mut grace_sleep => {
             capture.task.abort();
             Ok(LimitWait::StillOpen(capture.snapshot()?))
         }
     }
+}
+
+async fn await_finished_output_task(
+    capture: &mut OutputCapture,
+    stream_name: &'static str,
+) -> Result<BufferedOutput> {
+    finish_output_task((&mut capture.task).await, stream_name)
+}
+
+fn finish_output_task(
+    join_result: std::result::Result<Result<BufferedOutput>, JoinError>,
+    stream_name: &'static str,
+) -> Result<BufferedOutput> {
+    join_result
+        .map_err(|error| AppError::internal(format!("{stream_name} task failed: {error}")))?
 }
 
 fn abort_output_tasks(stdout: &Option<OutputCapture>, stderr: &Option<OutputCapture>) {
@@ -389,6 +381,25 @@ fn command_timeout_error(command_label: &str, timeout: Duration) -> AppError {
     ))
 }
 
+fn missing_required_output_error(
+    output: &BufferedOutput,
+    stream_name: &str,
+    command_label: &str,
+    max_output: usize,
+    needle: &str,
+) -> AppError {
+    if output.reached_capture_boundary_before_eof() {
+        return output_limit_error(stream_name, command_label, max_output, needle);
+    }
+    if !output.complete {
+        return output_open_error(stream_name, command_label, needle);
+    }
+
+    AppError::failure(format!(
+        "{stream_name} of {command_label} does not contain required text {needle:?}"
+    ))
+}
+
 fn output_limit_error(
     stream_name: &str,
     command_label: &str,
@@ -397,6 +408,12 @@ fn output_limit_error(
 ) -> AppError {
     AppError::failure(format!(
         "{stream_name} of {command_label} reached --max-output {max_output} bytes, cannot prove required text {needle:?}"
+    ))
+}
+
+fn output_open_error(stream_name: &str, command_label: &str, needle: &str) -> AppError {
+    AppError::failure(format!(
+        "{stream_name} of {command_label} remained open after the command exited, cannot prove required text {needle:?}"
     ))
 }
 
@@ -532,29 +549,18 @@ where
         let read = reader
             .read(&mut buffer)
             .await
-            .map_err(|error| AppError::internal(format!("failed reading child output: {error}")))?;
+            .map_err(|error| AppError::failure(format!("failed reading child output: {error}")))?;
         if read == 0 {
             break;
         }
 
         let current = {
             let mut output = lock_output_state(state.as_ref())?;
-            let previous_len = output.bytes.len();
+            let previous_len = output.content.append_limited(&buffer[..read], limit);
 
-            if output.bytes.len() < limit {
-                let remaining = limit - output.bytes.len();
-                if read > remaining {
-                    output.truncated = true;
-                }
-                let slice = &buffer[..read.min(remaining)];
-                output.bytes.extend_from_slice(slice);
-            } else {
-                output.truncated = true;
-            }
-
-            matcher.observe_appended(&output.bytes, previous_len);
+            matcher.observe_appended(output.content.bytes(), previous_len);
             output.matched = !required_texts.is_empty() && matcher.all_matched();
-            output.limit_reached = !required_texts.is_empty() && output.bytes.len() == limit;
+            output.limit_reached = !required_texts.is_empty() && output.content.len() == limit;
             output.complete = false;
             OutputProgress::from(&*output)
         };
@@ -577,8 +583,12 @@ fn lock_output_state(state: &Mutex<BufferedOutput>) -> Result<MutexGuard<'_, Buf
 }
 
 impl BufferedOutput {
-    fn cannot_prove_absence(&self) -> bool {
-        self.truncated || (self.limit_reached && !self.complete)
+    fn bytes(&self) -> &[u8] {
+        self.content.bytes()
+    }
+
+    fn reached_capture_boundary_before_eof(&self) -> bool {
+        self.content.is_incomplete() || (self.limit_reached && !self.complete)
     }
 }
 
@@ -600,33 +610,50 @@ fn termination_suffix(_status: &std::process::ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        io,
+        pin::Pin,
         sync::{Arc, Mutex},
+        task::{Context, Poll},
         time::Duration,
     };
 
     use super::{
-        BufferedOutput, LimitWait, OutputCapture, OutputProgress, await_output_task, read_limited,
-        spawn_output_capture, wait_for_output_settle,
+        BufferedOutput, LimitWait, OutputCapture, OutputProgress, await_output_task,
+        missing_required_output_error, read_limited, spawn_output_capture, wait_for_output_settle,
     };
     use tokio::io::AsyncWriteExt;
     use tokio::sync::watch;
 
     #[tokio::test]
-    async fn read_limited_marks_truncated_output() {
+    async fn read_limited_marks_output_beyond_limit_incomplete() {
         let output = read_limited(&b"abcdef"[..], 3, Vec::new()).await.unwrap();
 
-        assert_eq!(output.bytes, b"abc");
-        assert!(output.truncated);
+        assert_eq!(output.bytes(), b"abc");
+        assert!(output.content.is_incomplete());
         assert!(output.complete);
     }
 
     #[tokio::test]
-    async fn read_limited_leaves_short_output_untruncated() {
+    async fn read_limited_leaves_short_output_complete() {
         let output = read_limited(&b"abc"[..], 3, Vec::new()).await.unwrap();
 
-        assert_eq!(output.bytes, b"abc");
-        assert!(!output.truncated);
+        assert_eq!(output.bytes(), b"abc");
+        assert!(!output.content.is_incomplete());
         assert!(output.complete);
+    }
+
+    #[tokio::test]
+    async fn read_limited_reports_reader_errors_as_probe_failures() {
+        let error = read_limited(FailingReader, 3, Vec::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .to_string()
+                .contains("failed reading child output: synthetic read failure")
+        );
     }
 
     #[tokio::test]
@@ -635,10 +662,24 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.bytes, b"abcd");
+        assert_eq!(output.bytes(), b"abcd");
         assert!(output.limit_reached);
         assert!(output.complete);
-        assert!(!output.cannot_prove_absence());
+        assert!(!output.reached_capture_boundary_before_eof());
+    }
+
+    #[test]
+    fn incomplete_output_below_limit_reports_unproven_absence() {
+        let mut output = BufferedOutput::default();
+        output.content.append_limited(b"aaa", 4);
+        let error = missing_required_output_error(&output, "stdout", "sh", 4, "ready");
+
+        assert!(!output.reached_capture_boundary_before_eof());
+        assert!(
+            error
+                .to_string()
+                .contains("remained open after the command exited, cannot prove required text")
+        );
     }
 
     #[tokio::test]
@@ -654,8 +695,8 @@ mod tests {
         let output = capture.snapshot().unwrap();
         capture.task.abort();
 
-        assert_eq!(output.bytes, b"ok");
-        assert!(!output.truncated);
+        assert_eq!(output.bytes(), b"ok");
+        assert!(!output.content.is_incomplete());
         assert!(output.matched);
         assert!(!output.complete);
     }
@@ -686,7 +727,7 @@ mod tests {
         .unwrap();
 
         writer_task.await.unwrap();
-        assert_eq!(output.bytes, b"ready");
+        assert_eq!(output.bytes(), b"ready");
         assert!(output.matched);
     }
 
@@ -704,11 +745,12 @@ mod tests {
         let updater = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             let mut output = state.lock().unwrap();
-            output.bytes = b"latest".to_vec();
+            output.content.append_limited(b"latest", 65_536);
         });
 
         let settled = wait_for_output_settle(
             &mut capture,
+            "stdout",
             tokio::time::Instant::now() + Duration::from_millis(100),
             Duration::from_millis(30),
         )
@@ -717,8 +759,54 @@ mod tests {
 
         updater.await.unwrap();
         match settled {
-            LimitWait::StillOpen(output) => assert_eq!(output.bytes, b"latest"),
+            LimitWait::StillOpen(output) => assert_eq!(output.bytes(), b"latest"),
             _ => panic!("expected output capture to remain open"),
+        }
+    }
+
+    #[tokio::test]
+    async fn output_settle_treats_closed_progress_channel_as_finished_task() {
+        let state = Arc::new(Mutex::new(BufferedOutput::default()));
+        let (progress_tx, progress) = watch::channel(OutputProgress::default());
+        let task = tokio::spawn(async move {
+            drop(progress_tx);
+            tokio::task::yield_now().await;
+
+            let mut output = BufferedOutput::default();
+            output.content.append_limited(b"done", 65_536);
+            output.complete = true;
+            Ok(output)
+        });
+        let mut capture = OutputCapture {
+            task,
+            progress,
+            state,
+        };
+
+        let settled = wait_for_output_settle(
+            &mut capture,
+            "stdout",
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(30),
+        )
+        .await
+        .unwrap();
+
+        match settled {
+            LimitWait::Finished(output) => assert_eq!(output.bytes(), b"done"),
+            _ => panic!("expected closed progress channel to finish output capture"),
+        }
+    }
+
+    struct FailingReader;
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other("synthetic read failure")))
         }
     }
 }

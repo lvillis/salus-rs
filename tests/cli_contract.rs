@@ -447,8 +447,88 @@ fn quiet_suppresses_environment_expansion_errors() {
 }
 
 #[test]
+fn later_quiet_suppresses_environment_expansion_errors_when_prefix_remains_valid() {
+    let path = temp_file_path("salus-cli-later-quiet-env-error");
+    write_file(&path, b"ready\n");
+
+    let output = run_salus_with_env(
+        &[
+            "file",
+            "--path",
+            &path.display().to_string(),
+            "--contains",
+            "${SALUS_TEST_MISSING_ENV}",
+            "--quiet",
+        ],
+        &[("SALUS_TEST_MISSING_ENV", None)],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn quiet_suppresses_cli_parse_errors() {
     let output = run_salus(&["--quiet", "--bad-flag"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn quiet_does_not_suppress_verbose_conflict_errors() {
+    let output = run_salus(&["--quiet", "--verbose", "file", "--path", "/tmp/salus-test"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--quiet"));
+    assert!(stderr.contains("--verbose"));
+}
+
+#[test]
+fn leading_quiet_suppresses_missing_option_value_errors() {
+    let output = run_salus(&[
+        "--quiet",
+        "file",
+        "--path",
+        "/tmp/salus-test",
+        "--max-age",
+        "--bad",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_quiet_does_not_suppress_verbose_conflict_errors() {
+    let output = run_salus(&["exec", "--quiet", "--verbose", "--", "sh", "-c", "exit 0"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--quiet"));
+    assert!(stderr.contains("--verbose"));
+}
+
+#[test]
+fn leading_exec_quiet_suppresses_missing_assertion_value_errors() {
+    let output = run_salus(&[
+        "exec",
+        "--quiet",
+        "--stdout-contains",
+        "--bad",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
 
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
@@ -465,6 +545,50 @@ fn expanded_quiet_suppresses_cli_parse_errors() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn raw_quiet_does_not_suppress_parse_errors_after_expansion_changes_argv_shape() {
+    let output = run_salus_with_env(
+        &[
+            "--timeout",
+            "${SALUS_TEST_BAD_OPTION}",
+            "--quiet",
+            "file",
+            "--path",
+            "/tmp/salus-test",
+        ],
+        &[("SALUS_TEST_BAD_OPTION", Some("--bad"))],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--bad'"));
+}
+
+#[test]
+fn raw_quiet_does_not_suppress_environment_errors_after_expansion_changes_argv_shape() {
+    let output = run_salus_with_env(
+        &[
+            "--timeout",
+            "${SALUS_TEST_BAD_OPTION}",
+            "--quiet",
+            "file",
+            "--path",
+            "${SALUS_TEST_MISSING_ENV}",
+        ],
+        &[
+            ("SALUS_TEST_BAD_OPTION", Some("--bad")),
+            ("SALUS_TEST_MISSING_ENV", None),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("environment variable SALUS_TEST_MISSING_ENV is not set")
+    );
 }
 
 #[test]
@@ -832,6 +956,258 @@ fn option_value_positions_named_like_quiet_do_not_suppress_errors() {
 }
 
 #[test]
+fn later_help_does_not_hide_missing_option_value() {
+    let output = run_salus(&["http", "--url", "--bad", "--help"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--bad'"));
+}
+
+#[test]
+fn later_quiet_does_not_suppress_missing_option_value() {
+    let output = run_salus(&[
+        "file",
+        "--path",
+        "/tmp/salus-test",
+        "--max-age",
+        "--bad",
+        "--quiet",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--bad'"));
+}
+
+#[test]
+fn later_exec_help_does_not_hide_missing_assertion_value() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "--quiet",
+        "--help",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("a value is required for '--stdout-contains <TEXT>'")
+    );
+}
+
+#[test]
+fn exec_assertion_does_not_consume_unknown_option_before_command() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "--bad",
+        "--help",
+        "--",
+        "sh",
+        "-c",
+        "echo --bad",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--bad'"));
+}
+
+#[test]
+fn exec_assertion_can_still_match_hyphen_text_with_equals() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains=--bad",
+        "--",
+        "sh",
+        "-c",
+        "echo --bad",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn exec_negative_exit_code_reaches_domain_validation() {
+    let output = run_salus(&["exec", "--exit-code", "-1", "--", "sh", "-c", "exit 0"]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid exit code -1, expected 0..=255")
+    );
+}
+
+#[test]
+fn http_negative_status_reaches_domain_validation() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:1/healthz",
+        "--status",
+        "-1",
+    ]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("invalid status code -1, expected integer")
+    );
+}
+
+#[test]
+fn negative_limit_values_reach_value_parsers() {
+    let http = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:1/healthz",
+        "--max-body",
+        "-1",
+    ]);
+    let exec = run_salus(&["exec", "--max-output", "-1", "--", "sh", "-c", "exit 0"]);
+    let file = run_salus(&["file", "--path", "/tmp/salus-test", "--max-read", "-1"]);
+
+    assert_eq!(http.status.code(), Some(3));
+    assert_eq!(exec.status.code(), Some(3));
+    assert_eq!(file.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&http.stderr).contains("invalid value '-1'"));
+    assert!(String::from_utf8_lossy(&exec.stderr).contains("invalid value '-1'"));
+    assert!(String::from_utf8_lossy(&file.stderr).contains("invalid value '-1'"));
+}
+
+#[test]
+fn empty_assertion_values_are_reported_before_capture_limit_errors() {
+    let http = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:1/healthz",
+        "--contains",
+        "",
+        "--max-body",
+        "0",
+    ]);
+    let exec = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "",
+        "--max-output",
+        "0",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
+    let file = run_salus(&[
+        "file",
+        "--path",
+        "/tmp/salus-test",
+        "--contains",
+        "",
+        "--max-read",
+        "0",
+    ]);
+
+    assert_eq!(http.status.code(), Some(3));
+    assert_eq!(exec.status.code(), Some(3));
+    assert_eq!(file.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&http.stderr).contains("--contains must not be empty"));
+    assert!(String::from_utf8_lossy(&exec.stderr).contains("--stdout-contains must not be empty"));
+    assert!(String::from_utf8_lossy(&file.stderr).contains("--contains must not be empty"));
+    assert!(!String::from_utf8_lossy(&http.stderr).contains("--max-body"));
+    assert!(!String::from_utf8_lossy(&exec.stderr).contains("--max-output"));
+    assert!(!String::from_utf8_lossy(&file.stderr).contains("--max-read"));
+}
+
+#[test]
+fn http_header_assertion_errors_are_reported_before_capture_limit_errors() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:1/healthz",
+        "--contains",
+        "ready",
+        "--header-contains",
+        "x-ready:",
+        "--max-body",
+        "0",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--header-contains value must not be empty"));
+    assert!(!stderr.contains("--max-body"));
+}
+
+#[test]
+fn negative_duration_values_reach_value_parsers() {
+    let timeout = run_salus(&["--timeout", "-1", "file", "--path", "/tmp/salus-test"]);
+    let max_age = run_salus(&["file", "--path", "/tmp/salus-test", "--max-age", "-1"]);
+
+    assert_eq!(timeout.status.code(), Some(3));
+    assert_eq!(max_age.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&timeout.stderr).contains("invalid duration: -1"));
+    assert!(String::from_utf8_lossy(&max_age.stderr).contains("invalid duration: -1"));
+}
+
+#[test]
+fn file_config_errors_are_reported_before_tiny_probe_timeout() {
+    let output = run_salus(&[
+        "--timeout",
+        "1ns",
+        "file",
+        "--path",
+        "/tmp/salus-test",
+        "--max-age",
+        "0",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--max-age must be greater than 0"));
+    assert!(!stderr.contains("timed out"));
+}
+
+#[test]
+fn negative_numeric_parser_errors_can_be_quieted() {
+    let timeout = run_salus(&[
+        "--timeout",
+        "-1.0",
+        "--quiet",
+        "file",
+        "--path",
+        "/tmp/salus-test",
+    ]);
+    let exec = run_salus(&[
+        "exec",
+        "--max-output",
+        "-1.0",
+        "--quiet",
+        "--",
+        "sh",
+        "-c",
+        "exit 0",
+    ]);
+
+    assert_eq!(timeout.status.code(), Some(3));
+    assert_eq!(exec.status.code(), Some(3));
+    assert!(timeout.stdout.is_empty());
+    assert!(timeout.stderr.is_empty());
+    assert!(exec.stdout.is_empty());
+    assert!(exec.stderr.is_empty());
+}
+
+#[test]
 fn success_is_silent_by_default() {
     let path = temp_file_path("salus-cli-success-silent");
     write_file(&path, b"ready\n");
@@ -899,6 +1275,42 @@ fn verbose_file_success_escapes_non_utf8_path() {
     let _ = fs::remove_file(path);
 }
 
+#[cfg(unix)]
+#[test]
+fn exec_spawn_error_escapes_non_utf8_command_path() {
+    let path = temp_non_utf8_path("salus-cli-non-utf8-command");
+    let output = run_salus_os(&[OsString::from("exec"), path.as_os_str().to_os_string()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("\\xFF"));
+    assert!(!stderr.contains('\u{FFFD}'));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_spawn_error_for_invalid_executable_is_a_config_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = temp_file_path("salus-cli-invalid-executable");
+    write_file(&path, b"not an executable");
+    let mut permissions = fs::metadata(&path)
+        .expect("test executable metadata must be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("test executable permissions must be writable");
+
+    let output = run_salus_os(&[OsString::from("exec"), path.as_os_str().to_os_string()]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("failed to spawn"));
+
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn quiet_failure_suppresses_stderr() {
     let path = temp_file_path("salus-cli-quiet-failure");
@@ -952,6 +1364,36 @@ fn tcp_error_escapes_control_characters_in_address() {
     assert!(output.stdout.is_empty());
     assert!(!stderr.contains("bad\naddr:80"));
     assert!(stderr.contains("\"bad\\naddr:80\""));
+}
+
+#[cfg(feature = "grpc")]
+#[test]
+fn grpc_address_path_is_reported_before_port_shape() {
+    let output = run_salus(&["grpc", "--addr", "127.0.0.1:50051/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("path, query, and fragment are not allowed"));
+    assert!(!stderr.contains("port must be a valid integer"));
+}
+
+#[cfg(feature = "grpc")]
+#[test]
+fn grpc_target_errors_are_reported_before_tls_mode_errors() {
+    let output = run_salus(&[
+        "grpc",
+        "--addr",
+        "127.0.0.1:50051/healthz",
+        "--ca",
+        "ca.pem",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("path, query, and fragment are not allowed"));
+    assert!(!stderr.contains("gRPC TLS flags require --tls"));
 }
 
 #[cfg(all(feature = "grpc", not(feature = "webpki")))]
@@ -1032,6 +1474,66 @@ fn http_method_error_escapes_control_characters() {
 }
 
 #[test]
+fn http_header_errors_report_empty_header_names_consistently() {
+    let request_header = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--header",
+        ":ready",
+    ]);
+    let header_present = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--header-present",
+        "",
+    ]);
+    let header_contains = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--header-contains",
+        ":ready",
+    ]);
+
+    assert_eq!(request_header.status.code(), Some(3));
+    assert_eq!(header_present.status.code(), Some(3));
+    assert_eq!(header_contains.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&request_header.stderr).contains("--header name must not be empty")
+    );
+    assert!(
+        String::from_utf8_lossy(&header_present.stderr)
+            .contains("--header-present must not be empty")
+    );
+    assert!(
+        String::from_utf8_lossy(&header_contains.stderr)
+            .contains("--header-contains name must not be empty")
+    );
+}
+
+#[test]
+fn http_target_errors_are_reported_before_request_and_assertion_errors() {
+    let bad_status = run_salus(&["http", "--url", "bad", "--status", "-1"]);
+    let bad_header = run_salus(&["http", "--url", "bad", "--header", ":ready"]);
+    let bad_method = run_salus(&["http", "--url", "bad", "--method", "POST"]);
+    let bad_body_assertion = run_salus(&["http", "--url", "bad", "--contains", ""]);
+
+    for output in [&bad_status, &bad_header, &bad_method, &bad_body_assertion] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(3));
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("URL scheme is required, expected http or https"));
+        assert!(!stderr.contains("invalid status code"));
+        assert!(!stderr.contains("--header name must not be empty"));
+        assert!(!stderr.contains("unsupported HTTP method"));
+        assert!(!stderr.contains("--contains must not be empty"));
+    }
+}
+
+#[test]
 fn http_status_error_escapes_control_characters() {
     let output = run_salus(&[
         "http",
@@ -1075,6 +1577,166 @@ fn http_status_error_treats_leading_hyphen_as_invalid_code() {
 }
 
 #[test]
+fn http_url_port_errors_are_normalized_before_url_parsing() {
+    let out_of_range = run_salus(&["http", "--url", "http://127.0.0.1:65536/healthz"]);
+    let non_numeric = run_salus(&["http", "--url", "http://127.0.0.1:bad/healthz"]);
+    let extra_colon = run_salus(&["http", "--url", "http://127.0.0.1:80:90/healthz"]);
+    let out_of_range_stderr = String::from_utf8_lossy(&out_of_range.stderr);
+    let non_numeric_stderr = String::from_utf8_lossy(&non_numeric.stderr);
+    let extra_colon_stderr = String::from_utf8_lossy(&extra_colon.stderr);
+
+    assert_eq!(out_of_range.status.code(), Some(3));
+    assert_eq!(non_numeric.status.code(), Some(3));
+    assert_eq!(extra_colon.status.code(), Some(3));
+    assert!(out_of_range.stdout.is_empty());
+    assert!(non_numeric.stdout.is_empty());
+    assert!(extra_colon.stdout.is_empty());
+    assert!(out_of_range_stderr.contains("URL port must be between 1 and 65535"));
+    assert!(non_numeric_stderr.contains("URL port must be a valid integer"));
+    assert!(extra_colon_stderr.contains("URL port must be a valid integer"));
+    assert!(!out_of_range_stderr.contains("invalid URL"));
+    assert!(!non_numeric_stderr.contains("invalid URL"));
+    assert!(!extra_colon_stderr.contains("invalid URL"));
+}
+
+#[test]
+fn http_empty_url_host_is_reported_before_port_shape() {
+    let output = run_salus(&["http", "--url", "http://:bad/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("URL must contain a host"));
+    assert!(!stderr.contains("URL port"));
+    assert!(!stderr.contains("invalid URL"));
+}
+
+#[test]
+fn http_unbracketed_ipv6_url_host_is_reported_before_port_shape() {
+    let output = run_salus(&["http", "--url", "http://2001:db8::1:80/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("URL host uses an IPv6 address"));
+    assert!(stderr.contains("IPv6 addresses must be enclosed in brackets"));
+    assert!(!stderr.contains("URL port"));
+    assert!(!stderr.contains("invalid URL"));
+}
+
+#[test]
+fn http_malformed_unbracketed_ipv6_url_host_is_reported_before_port_shape() {
+    let output = run_salus(&["http", "--url", "http://2001:db8::zz:80/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("URL host uses an IPv6 address"));
+    assert!(stderr.contains("IPv6 addresses must be enclosed in brackets"));
+    assert!(!stderr.contains("URL port"));
+    assert!(!stderr.contains("invalid URL"));
+}
+
+#[test]
+fn http_unbracketed_ipv6_host_override_is_reported_before_port_shape() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "2001:db8::1",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("invalid Host header \"2001:db8::1\""));
+    assert!(stderr.contains("IPv6 addresses must be enclosed in brackets"));
+    assert!(!stderr.contains("port must be a valid integer"));
+}
+
+#[test]
+fn http_host_override_rejects_whitespace_without_connecting() {
+    let output = run_salus(&[
+        "http",
+        "--url",
+        "http://127.0.0.1:9/healthz",
+        "--host",
+        "example.com\n",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("invalid Host header \"example.com\\n\""));
+    assert!(stderr.contains("authority must not contain whitespace"));
+    assert!(!stderr.contains("HTTP request"));
+}
+
+#[test]
+fn http_missing_url_scheme_is_reported_explicitly() {
+    let output = run_salus(&["http", "--url", "127.0.0.1:8080/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("URL scheme is required, expected http or https"));
+    assert!(!stderr.contains("relative URL"));
+}
+
+#[test]
+fn http_unsupported_scheme_is_reported_before_authority_shape() {
+    let output = run_salus(&["http", "--url", "file:///tmp/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("unsupported URL scheme file, expected http or https"));
+    assert!(!stderr.contains("URL must contain a host"));
+}
+
+#[test]
+fn http_unsupported_scheme_is_reported_before_port_shape() {
+    let output = run_salus(&["http", "--url", "ftp://example.com:bad/healthz"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("unsupported URL scheme ftp, expected http or https"));
+    assert!(!stderr.contains("URL port"));
+    assert!(!stderr.contains("invalid URL"));
+}
+
+#[test]
+fn http_url_non_ascii_text_is_reported_before_uri_parsing() {
+    let output = run_salus(&["http", "--url", "http://127.0.0.1:9/\u{5065}\u{5EB7}"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("--url must contain only ASCII URI characters"));
+    assert!(!stderr.contains("invalid URL"));
+}
+
+#[cfg(unix)]
+#[test]
+fn http_unix_socket_path_non_ascii_text_is_reported_before_uri_parsing() {
+    let output = run_salus(&[
+        "http",
+        "--sock",
+        "/tmp/salus-test.sock",
+        "--path",
+        "/\u{5065}\u{5EB7}",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("HTTP UDS --path must contain only ASCII URI characters"));
+    assert!(!stderr.contains("invalid HTTP UDS --path"));
+}
+
+#[test]
 fn exec_complete_output_at_limit_reports_missing_required_text() {
     let output = run_salus(&[
         "exec",
@@ -1114,4 +1776,25 @@ fn exec_inherited_pipe_at_output_limit_reports_missing_required_text_after_clean
     assert!(output.stdout.is_empty());
     assert!(stderr.contains("stdout of sh does not contain required text \"ready\""));
     assert!(!stderr.contains("cannot prove"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_open_daemonized_output_pipe_reports_unproven_assertion() {
+    let output = run_salus(&[
+        "exec",
+        "--stdout-contains",
+        "ready",
+        "--",
+        "sh",
+        "-c",
+        "printf no; setsid sh -c 'sleep 1' & sleep 0.05",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains(
+        "stdout of sh remained open after the command exited, cannot prove required text \"ready\""
+    ));
 }

@@ -5,11 +5,12 @@ use crate::error::{AppError, Result};
 pub struct ExpandArgvError {
     error: AppError,
     partial_args: Vec<OsString>,
+    raw_tail: Vec<OsString>,
 }
 
 impl ExpandArgvError {
-    pub fn into_parts(self) -> (AppError, Vec<OsString>) {
-        (self.error, self.partial_args)
+    pub fn into_parts(self) -> (AppError, Vec<OsString>, Vec<OsString>) {
+        (self.error, self.partial_args, self.raw_tail)
     }
 }
 
@@ -27,13 +28,17 @@ where
         expanded.push(arg0.into());
     }
 
-    for arg in iter {
-        match expand_arg_os(arg.into(), &lookup_env) {
+    while let Some(arg) = iter.next() {
+        let arg = arg.into();
+        match expand_arg_os(arg.clone(), &lookup_env) {
             Ok(arg) => expanded.push(arg),
             Err(error) => {
+                let mut raw_tail = vec![arg];
+                raw_tail.extend(iter.map(Into::into));
                 return Err(ExpandArgvError {
                     error,
                     partial_args: expanded,
+                    raw_tail,
                 });
             }
         }

@@ -656,6 +656,19 @@ async fn http_probe_rejects_url_with_backslash() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_url_with_quote() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "http://127.0.0.1:9/\"healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
 async fn http_probe_rejects_url_with_invalid_percent_encoding() {
     let code = salus::main_entry(args(&["salus", "http", "--url", "http://127.0.0.1:9/%zz"])).await;
 
@@ -1003,6 +1016,22 @@ async fn http_probe_rejects_unix_socket_path_with_backslash_before_connecting() 
 
 #[cfg(unix)]
 #[tokio::test]
+async fn http_probe_rejects_unix_socket_path_with_quote_before_connecting() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--sock",
+        "/tmp/salus-missing-quote-path.sock",
+        "--path",
+        "/\"healthz",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn http_probe_rejects_unix_socket_path_with_invalid_percent_encoding_before_connecting() {
     let code = salus::main_entry(args(&[
         "salus",
@@ -1081,6 +1110,22 @@ async fn https_probe_rejects_empty_ca_file() {
         "https://127.0.0.1:9/healthz",
         "--ca",
         "",
+    ]))
+    .await;
+
+    assert_eq!(code, 3);
+}
+
+#[tokio::test]
+async fn https_probe_rejects_empty_server_name_override() {
+    let code = salus::main_entry(args(&[
+        "salus",
+        "http",
+        "--url",
+        "https://127.0.0.1:9/healthz",
+        "--server-name",
+        "",
+        "--insecure-skip-verify",
     ]))
     .await;
 
