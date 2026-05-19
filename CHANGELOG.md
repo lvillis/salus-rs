@@ -1,3 +1,13 @@
+## [0.1.10] - 2026-05-19
+
+### 🚀 Features
+
+- Harden CLI parsing and probe validation
+
+### 🐛 Bug Fixes
+
+- Harden probe validation and streaming assertions
+- *(cli)* Tighten argument validation and quiet parsing
 ## [0.1.9] - 2026-05-09
 
 ### 🐛 Bug Fixes
@@ -5,6 +15,10 @@
 - Handle probe edge cases without hangs or false failures
 - Harden CLI parsing and probe execution
 - Harden probe validation and output handling
+
+### ⚙️ Miscellaneous Tasks
+
+- Release salus version 0.1.9
 ## [0.1.8] - 2026-04-23
 
 ### 🚀 Features
